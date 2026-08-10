@@ -248,10 +248,15 @@ class OpenRouterRoadmapGeneratorTests(unittest.TestCase):
     def test_service_templates_use_single_pipeline_env_file(self) -> None:
         telegram_service = (ROOT / "deploy/systemd/telegram-roadmap-webhook.service").read_text(encoding="utf-8")
         notion_service = (ROOT / "deploy/systemd/notion-webhook-receiver.service").read_text(encoding="utf-8")
+        local_bot_api_service = (ROOT / "deploy/systemd/telegram-bot-api-local.service").read_text(encoding="utf-8")
+        installer = (ROOT / "scripts/install_vps.sh").read_text(encoding="utf-8")
         self.assertIn("--env-file /etc/zoom-audio-pipeline/pipeline.env", telegram_service)
         self.assertIn("--notion-env-file /etc/zoom-audio-pipeline/pipeline.env", telegram_service)
         self.assertIn("--env-file /etc/zoom-audio-pipeline/pipeline.env", notion_service)
         self.assertIn("--webhook-env-file /etc/zoom-audio-pipeline/notion-webhook.env", notion_service)
+        self.assertIn("EnvironmentFile=/etc/zoom-audio-pipeline/pipeline.env", local_bot_api_service)
+        self.assertIn("ExecStart=/usr/local/bin/telegram-bot-api", local_bot_api_service)
+        self.assertIn("telegram-bot-api-local.service", installer)
 
     def test_notify_can_take_public_base_url_from_env_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
