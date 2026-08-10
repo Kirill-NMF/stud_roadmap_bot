@@ -215,6 +215,7 @@ class OpenRouterRoadmapGeneratorTests(unittest.TestCase):
     def test_packaging_installer_contains_required_files(self) -> None:
         installer = (ROOT / "scripts/install_vps.sh").read_text(encoding="utf-8")
         doctor = (ROOT / "scripts/doctor_vps.sh").read_text(encoding="utf-8")
+        workflow = (ROOT / ".github/workflows/tests.yml").read_text(encoding="utf-8")
         for expected in [
             "openrouter-roadmap-generate",
             "generate-verification-with-openrouter",
@@ -229,6 +230,7 @@ class OpenRouterRoadmapGeneratorTests(unittest.TestCase):
             self.assertIn(expected, installer)
         self.assertIn("TELEGRAM_BOT_TOKEN", doctor)
         self.assertIn("OPENROUTER_API_KEY", doctor)
+        self.assertIn("python3 scripts/roadmap_pipeline_tests.py", workflow)
 
 
 class OpenRouterTranscriptionTests(unittest.TestCase):
