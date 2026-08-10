@@ -1,0 +1,4 @@
+interface:
+  display_name: "English Roadmap Rewrite"
+  short_description: "Human Pro-style roadmap rewrite"
+  default_prompt: "Use $english-roadmap-rewrite to rewrite this roadmap in the approved Pro-style while preserving structure and facts."

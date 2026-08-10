@@ -1,0 +1,19 @@
+[Unit]
+Description=Telegram roadmap pipeline webhook
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=PIPELINE_ENV_FILE=/etc/zoom-audio-pipeline/pipeline.env
+ExecStart=/usr/local/bin/telegram-roadmap-webhook
+Restart=always
+RestartSec=3
+User=root
+WorkingDirectory=/var/lib/zoom-audio-pipeline
+StandardOutput=append:/var/log/zoom-audio-pipeline/telegram-webhook.log
+StandardError=append:/var/log/zoom-audio-pipeline/telegram-webhook.log
+
+[Install]
+WantedBy=multi-user.target
+

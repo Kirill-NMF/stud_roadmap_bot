@@ -1,0 +1,41 @@
+dev.short-talk.space {
+	bind 79.137.203.239
+	handle /api/* {
+		reverse_proxy localhost:8787
+	}
+
+	handle /telegram/* {
+		reverse_proxy localhost:8787
+	}
+
+	handle /health {
+		reverse_proxy localhost:8787
+	}
+
+	handle /shorttalk-vpn-ws* {
+		reverse_proxy 127.0.0.1:10000
+	}
+
+	handle /notion/webhook {
+		reverse_proxy 127.0.0.1:8791
+	}
+
+	handle /notion/health {
+		reverse_proxy 127.0.0.1:8791
+	}
+
+	handle /roadmap-telegram/* {
+		reverse_proxy 127.0.0.1:8792
+	}
+
+	handle_path /roadmap-reader/* {
+		root * /var/www/roadmap-reader
+		file_server
+	}
+
+	handle {
+		reverse_proxy localhost:5173 {
+			header_up Host localhost:5173
+		}
+	}
+}

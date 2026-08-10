@@ -1,0 +1,11 @@
+.env
+*.env
+*.log
+*.pyc
+__pycache__/
+.venv/
+tmp/
+transcripts/
+nastya-chat-chain-run/
+research_audit/
+

@@ -1,0 +1,9 @@
+[Unit]
+Description=Poll Notion/Telegram intake for roadmap audio files
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/notion-pipeline-runner
+User=root
+WorkingDirectory=/var/lib/zoom-audio-pipeline
+
