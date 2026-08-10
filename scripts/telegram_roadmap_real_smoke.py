@@ -185,7 +185,7 @@ async def run_smoke(config: SmokeConfig) -> None:
         if config.action in {"approve", "approve_only"}:
             await click_button(notification, "Согласен")
             print("ok - clicked 'approve' button")
-            await wait_bot_message(client, bot, "Принято в работу", config.timeout)
+            await wait_for_approval_saved(Path(config.run_dir), config.timeout)
             assert_approval_saved(Path(config.run_dir))
             print("ok - approval status and teacher note saved")
             if config.action == "approve_only":
@@ -345,6 +345,21 @@ def assert_approval_saved(run_dir: Path) -> None:
         raise AssertionError("approval note did not confirm transcript/verification facts")
     if "PDF-опции P1-P14" not in note_text:
         raise AssertionError("approval note did not protect P1-P14 from auto-inclusion")
+
+
+async def wait_for_approval_saved(run_dir: Path, timeout: float) -> None:
+    deadline = asyncio.get_event_loop().time() + timeout
+    status = run_dir / "status.json"
+    while asyncio.get_event_loop().time() < deadline:
+        if status.exists():
+            try:
+                data = json.loads(status.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                data = {}
+            if data.get("teacher_verification_decision") == "approved_for_article":
+                return
+        await asyncio.sleep(1)
+    raise TimeoutError(f"Timed out waiting for approval status in {run_dir}")
 
 
 def assert_article_created(run_dir: Path) -> None:
