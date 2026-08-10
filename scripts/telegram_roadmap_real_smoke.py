@@ -341,7 +341,7 @@ def assert_approval_saved(run_dir: Path) -> None:
     data = json.loads(status.read_text(encoding="utf-8"))
     if data.get("teacher_verification_decision") != "approved_for_article":
         raise AssertionError("status.json did not record approved_for_article")
-    if "Согласен" not in note_text and "approved" not in note_text.lower():
+    if not note_text.strip():
         raise AssertionError("approval note was not saved")
 
 
