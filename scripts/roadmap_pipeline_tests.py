@@ -37,6 +37,7 @@ NOTION_PULL = load_module("notion_pull_audio", "scripts/notion_pull_audio.py")
 ARCHIVE_WORKER = load_module("telegram_notion_archive_worker", "scripts/telegram_notion_archive_worker.py")
 CLEANUP = load_module("telegram_intake_cleanup", "scripts/telegram_intake_cleanup.py")
 OPENROUTER_GENERATOR = load_module("openrouter_roadmap_generate", "scripts/openrouter_roadmap_generate.py")
+ENV_MIGRATOR = load_module("configure_pipeline_env_from_legacy", "scripts/configure_pipeline_env_from_legacy.py")
 
 
 VERIFICATION_MD = """# Проверка
@@ -235,6 +236,7 @@ class OpenRouterRoadmapGeneratorTests(unittest.TestCase):
             "notion-pipeline-poll.service",
             "notion-webhook-receiver.service",
             "telegram-roadmap-webhook.service",
+            "configure-pipeline-env-from-legacy",
         ]:
             self.assertIn(expected, installer)
         self.assertIn("TELEGRAM_BOT_TOKEN", doctor)
@@ -244,6 +246,52 @@ class OpenRouterRoadmapGeneratorTests(unittest.TestCase):
         self.assertTrue((ROOT / "scripts/bootstrap_ubuntu.sh").exists())
         self.assertTrue((ROOT / "docs/HANDOFF_DEPLOY.md").exists())
         self.assertTrue((ROOT / "deploy/Caddyfile.example").exists())
+
+    def test_env_migrator_merges_legacy_files_without_printing_secrets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "pipeline.env"
+            target.write_text("TELEGRAM_BOT_TOKEN=\nROADMAP_PUBLIC_ROOT=/custom/public\n", encoding="utf-8")
+            telegram = root / "roadmap-bot.env"
+            telegram.write_text(
+                "TELEGRAM_BOT_TOKEN=bot-secret\nTELEGRAM_WEBHOOK_SECRET=webhook-secret\nTELEGRAM_CHAT_ID=42\n",
+                encoding="utf-8",
+            )
+            notion = root / "notion.env"
+            notion.write_text("NOTION_API_KEY=notion-secret\nNOTION_TARGET=https://notion.example/page\n", encoding="utf-8")
+            openrouter = root / "openrouter.env"
+            openrouter.write_text("OPENROUTER_API_KEY=openrouter-secret\n", encoding="utf-8")
+            telethon = root / "telegram-e2e.env"
+            telethon.write_text(
+                "SHORTTALK_REAL_TG_API_ID=123\nSHORTTALK_REAL_TG_API_HASH=hash-secret\n",
+                encoding="utf-8",
+            )
+
+            with patch.object(sys, "argv", [
+                "configure_pipeline_env_from_legacy.py",
+                "--target",
+                str(target),
+                "--source",
+                str(telegram),
+                "--source",
+                str(notion),
+                "--source",
+                str(openrouter),
+                "--source",
+                str(telethon),
+            ]), patch("sys.stdout", new_callable=io.StringIO) as stdout:
+                self.assertEqual(ENV_MIGRATOR.main(), 0)
+
+            output = stdout.getvalue()
+            merged = ENV_MIGRATOR.load_env(target)
+            self.assertIn("configured_keys=", output)
+            self.assertNotIn("bot-secret", output)
+            self.assertNotIn("hash-secret", output)
+            self.assertEqual(merged["TELEGRAM_BOT_TOKEN"], "bot-secret")
+            self.assertEqual(merged["TELEGRAM_API_BASE_URL"], "http://127.0.0.1:8081")
+            self.assertEqual(merged["TELEGRAM_LOCAL_API_ID"], "123")
+            self.assertEqual(merged["TELEGRAM_LOCAL_API_HASH"], "hash-secret")
+            self.assertEqual(merged["ROADMAP_PUBLIC_ROOT"], "/custom/public")
 
     def test_service_templates_use_single_pipeline_env_file(self) -> None:
         telegram_service = (ROOT / "deploy/systemd/telegram-roadmap-webhook.service").read_text(encoding="utf-8")

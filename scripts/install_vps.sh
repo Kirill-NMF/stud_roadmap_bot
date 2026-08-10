@@ -37,6 +37,7 @@ install -m 0755 "$ROOT_DIR/scripts/telegram_roadmap_webhook.py" "$BIN_DIR/telegr
 install -m 0755 "$ROOT_DIR/scripts/telegram_notion_archive_worker.py" "$BIN_DIR/telegram-notion-archive-worker"
 install -m 0755 "$ROOT_DIR/scripts/telegram_intake_cleanup.py" "$BIN_DIR/telegram-intake-cleanup"
 install -m 0755 "$ROOT_DIR/scripts/transcribe_telegram_voice.py" "$BIN_DIR/transcribe-telegram-voice"
+install -m 0755 "$ROOT_DIR/scripts/configure_pipeline_env_from_legacy.py" "$BIN_DIR/configure-pipeline-env-from-legacy"
 install -m 0755 "$ROOT_DIR/scripts/openrouter_roadmap_generate.py" "$BIN_DIR/openrouter-roadmap-generate"
 install -m 0755 "$ROOT_DIR/scripts/generate_verification_with_openrouter.sh" "$BIN_DIR/generate-verification-with-openrouter"
 install -m 0755 "$ROOT_DIR/scripts/generate_article_with_openrouter.sh" "$BIN_DIR/generate-article-with-openrouter"
@@ -69,6 +70,7 @@ python3 -m py_compile \
   "$BIN_DIR/telegram-roadmap-webhook" \
   "$BIN_DIR/telegram-notion-archive-worker" \
   "$BIN_DIR/telegram-intake-cleanup" \
+  "$BIN_DIR/configure-pipeline-env-from-legacy" \
   "$BIN_DIR/openrouter-roadmap-generate"
 
 systemctl daemon-reload
