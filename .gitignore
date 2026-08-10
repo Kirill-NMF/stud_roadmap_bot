@@ -8,4 +8,7 @@ tmp/
 transcripts/
 nastya-chat-chain-run/
 research_audit/
-
+rewrite/
+ssh-test.txt
+openrouter-pro.py
+openrouter-pro-auth

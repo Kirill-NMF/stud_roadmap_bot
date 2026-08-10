@@ -37,6 +37,7 @@ check "roadmap-markdown-to-html" require_command roadmap-markdown-to-html
 
 for path in \
   /usr/local/bin/notion-pull-audio \
+  /usr/local/bin/notion-webhook-receiver \
   /usr/local/bin/process-new-audio \
   /usr/local/bin/process-approved-roadmaps \
   /usr/local/bin/telegram-roadmap-webhook \
@@ -71,6 +72,7 @@ if [[ -s "$ENV_FILE" ]]; then
 fi
 
 check "telegram-roadmap-webhook unit" systemctl cat telegram-roadmap-webhook.service
+check "notion-webhook-receiver unit" systemctl cat notion-webhook-receiver.service
 check "notion-pipeline-poll timer unit" systemctl cat notion-pipeline-poll.timer
 
 if [[ "$FAILED" -eq 0 ]]; then
@@ -80,4 +82,3 @@ else
 fi
 
 exit "$FAILED"
-

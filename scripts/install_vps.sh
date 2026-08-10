@@ -22,6 +22,7 @@ if command -v apt-get >/dev/null 2>&1; then
 fi
 
 install -m 0755 "$ROOT_DIR/scripts/notion_pull_audio.py" "$BIN_DIR/notion-pull-audio"
+install -m 0755 "$ROOT_DIR/scripts/notion_webhook_receiver.py" "$BIN_DIR/notion-webhook-receiver"
 install -m 0755 "$ROOT_DIR/scripts/notion_pipeline_runner.sh" "$BIN_DIR/notion-pipeline-runner"
 install -m 0755 "$ROOT_DIR/scripts/process_new_audio.py" "$BIN_DIR/process-new-audio"
 install -m 0755 "$ROOT_DIR/scripts/process_approved_roadmaps.py" "$BIN_DIR/process-approved-roadmaps"
@@ -50,9 +51,11 @@ fi
 install -m 0644 "$ROOT_DIR/deploy/systemd/notion-pipeline-poll.service" /etc/systemd/system/notion-pipeline-poll.service
 install -m 0644 "$ROOT_DIR/deploy/systemd/notion-pipeline-poll.timer" /etc/systemd/system/notion-pipeline-poll.timer
 install -m 0644 "$ROOT_DIR/deploy/systemd/telegram-roadmap-webhook.service" /etc/systemd/system/telegram-roadmap-webhook.service
+install -m 0644 "$ROOT_DIR/deploy/systemd/notion-webhook-receiver.service" /etc/systemd/system/notion-webhook-receiver.service
 
 python3 -m py_compile \
   "$BIN_DIR/notion-pull-audio" \
+  "$BIN_DIR/notion-webhook-receiver" \
   "$BIN_DIR/process-new-audio" \
   "$BIN_DIR/process-approved-roadmaps" \
   "$BIN_DIR/telegram-roadmap-notify" \

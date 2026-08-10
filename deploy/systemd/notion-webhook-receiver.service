@@ -1,0 +1,19 @@
+[Unit]
+Description=Notion roadmap pipeline webhook receiver
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=PIPELINE_ENV_FILE=/etc/zoom-audio-pipeline/pipeline.env
+ExecStart=/usr/local/bin/notion-webhook-receiver
+Restart=always
+RestartSec=3
+User=root
+WorkingDirectory=/var/lib/zoom-audio-pipeline
+StandardOutput=append:/var/log/zoom-audio-pipeline/notion-webhook.log
+StandardError=append:/var/log/zoom-audio-pipeline/notion-webhook.log
+
+[Install]
+WantedBy=multi-user.target
+

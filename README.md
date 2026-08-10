@@ -13,11 +13,21 @@ Flow:
 
 ## Install On VPS
 
+For handoff to another person, start with [docs/HANDOFF_DEPLOY.md](docs/HANDOFF_DEPLOY.md).
+
+Shortest bootstrap on a fresh Ubuntu/Debian VPS:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Kirill-NMF/stud_roadmap_bot/main/scripts/bootstrap_ubuntu.sh | sudo bash
+```
+
+Manual install after cloning:
+
 ```bash
 sudo bash scripts/install_vps.sh
 sudo nano /etc/zoom-audio-pipeline/pipeline.env
 sudo roadmap-pipeline-doctor
-sudo systemctl enable --now telegram-roadmap-webhook.service notion-pipeline-poll.timer
+sudo systemctl enable --now telegram-roadmap-webhook.service notion-webhook-receiver.service notion-pipeline-poll.timer
 ```
 
 Required secrets in `/etc/zoom-audio-pipeline/pipeline.env`:
@@ -71,4 +81,3 @@ On this Windows workspace:
 ```
 
 Current expected result: all tests pass.
-

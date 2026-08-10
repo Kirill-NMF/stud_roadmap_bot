@@ -217,6 +217,7 @@ class OpenRouterRoadmapGeneratorTests(unittest.TestCase):
         doctor = (ROOT / "scripts/doctor_vps.sh").read_text(encoding="utf-8")
         workflow = (ROOT / ".github/workflows/tests.yml").read_text(encoding="utf-8")
         for expected in [
+            "notion-webhook-receiver",
             "openrouter-roadmap-generate",
             "generate-verification-with-openrouter",
             "generate-article-with-openrouter",
@@ -225,12 +226,16 @@ class OpenRouterRoadmapGeneratorTests(unittest.TestCase):
             "consultation_article_prompt.md",
             "roadmap_enhancement_options.md",
             "notion-pipeline-poll.service",
+            "notion-webhook-receiver.service",
             "telegram-roadmap-webhook.service",
         ]:
             self.assertIn(expected, installer)
         self.assertIn("TELEGRAM_BOT_TOKEN", doctor)
         self.assertIn("OPENROUTER_API_KEY", doctor)
         self.assertIn("python3 scripts/roadmap_pipeline_tests.py", workflow)
+        self.assertTrue((ROOT / "scripts/bootstrap_ubuntu.sh").exists())
+        self.assertTrue((ROOT / "docs/HANDOFF_DEPLOY.md").exists())
+        self.assertTrue((ROOT / "deploy/Caddyfile.example").exists())
 
 
 class OpenRouterTranscriptionTests(unittest.TestCase):
