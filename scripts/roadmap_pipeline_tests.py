@@ -678,6 +678,11 @@ class OpenRouterTranscriptionTests(unittest.TestCase):
 
 
 class ProcessNewAudioIntakeNotifyTests(unittest.TestCase):
+    def test_telegram_oga_audio_is_supported_by_processor(self) -> None:
+        self.assertIn(".oga", PROCESS_AUDIO.AUDIO_SUFFIXES)
+        self.assertIn(".ogg", PROCESS_AUDIO.AUDIO_SUFFIXES)
+        self.assertIn(".opus", PROCESS_AUDIO.AUDIO_SUFFIXES)
+
     def test_telegram_intake_sidecar_adds_chat_id_to_notify_args(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

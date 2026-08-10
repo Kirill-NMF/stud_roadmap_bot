@@ -35,7 +35,7 @@ DEFAULT_OPENROUTER_TRANSCRIPTIONS_URL = "https://openrouter.ai/api/v1/audio/tran
 DEFAULT_OPENROUTER_STT_MODEL = "openai/whisper-large-v3-turbo"
 DEFAULT_OPENROUTER_API_KEY_FILE = "~/.config/openrouter/api_key"
 RETRIABLE_OPENROUTER_HTTP_CODES = {429, 500, 502, 503, 504}
-AUDIO_SUFFIXES = {".m4a", ".mp3", ".wav", ".mp4", ".aac", ".ogg", ".webm"}
+AUDIO_SUFFIXES = {".m4a", ".mp3", ".wav", ".mp4", ".aac", ".ogg", ".oga", ".opus", ".webm"}
 
 
 def safe_slug(name: str) -> str:
