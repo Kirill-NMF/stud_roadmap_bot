@@ -1,6 +1,8 @@
 # Builder Prompting
 
-Use this playbook before medium or risky implementation tasks.
+Use this playbook before every implementation task. The plan can be short for
+tiny docs-only changes, but the agent must still plan first, stop, and wait for
+owner approval before doing any work.
 
 ## Why
 
@@ -11,7 +13,7 @@ regressions.
 
 ## Mini-Stage Cycle
 
-For non-trivial work, define:
+For every task, define at least a compact version of:
 
 1. Goal.
 2. Scope.
@@ -23,6 +25,14 @@ For non-trivial work, define:
 8. Report format.
 
 Keep this compact for small changes.
+
+## Mandatory Start Rule
+
+The agent must output the task prompt or compact plan, then stop. Do not inspect
+files, run read-only commands, edit code, commit, push, deploy, restart services,
+or call real Telegram/Notion actions before the owner approves the plan. If
+diagnosis is needed, list the read-only diagnostic commands/checks in the plan
+and wait for approval.
 
 ## Task Prompt Template
 
@@ -66,10 +76,14 @@ What must be true before the task is complete.
 
 REPORT:
 Summarize changed files, commands run, results, residual risks, and next step.
+
+WAITING:
+Waiting for owner approval before starting work.
 ```
 
 ## Planning Rules
 
+- Plan first, then stop. Work starts only after explicit owner approval.
 - Split work into small batches. Prefer 2-4 focused files per step.
 - Work contract-first: define file-in/file-out or event-in/event-out before implementation.
 - Add anchor tests before implementation when a failure mode is clear.
@@ -98,4 +112,3 @@ FAILURE:
 - verification_log points to the log
 - no stale verification_done_at or verification_bytes fields
 ```
-

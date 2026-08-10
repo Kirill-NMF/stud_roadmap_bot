@@ -6,6 +6,16 @@ These rules are the operating guide for Codex work in this project.
 
 These rules override speed and convenience.
 
+- Every task starts with a written plan. After writing the plan, stop and wait
+  for explicit owner approval. No exceptions.
+- Do not run read-only checks, inspect files, search logs, edit code, commit,
+  push, deploy, restart services, migrate state, or call real Telegram/Notion
+  actions before the owner approves the plan. If read-only diagnosis is needed,
+  include it in the plan and wait for approval first.
+- After the owner approves the plan, work until the approved scope is complete
+  or until a real blocker requires owner input.
+- If the agent starts work without the plan-and-approval ritual, stop
+  immediately, say what happened, and restart from the written plan.
 - For any production-facing or risky change, do not edit code, commit, push,
   deploy, restart services, migrate state, or run real Telegram/Notion actions
   until the plan is written and explicitly approved by the owner.
@@ -13,9 +23,8 @@ These rules override speed and convenience.
   systemd/Caddy/runtime paths, webhooks, secrets/env handling, Local Bot API,
   OpenRouter/Gemini/Codex routing, cleanup/deletion, state/idempotency, and
   public HTML/PDF delivery.
-- Read-only diagnosis is allowed before approval when needed to understand the
-  issue. Keep it read-only: logs, status files, service status, git diff, and
-  source reads.
+- Read-only diagnosis is work. It must be planned and approved unless the owner
+  has already explicitly approved diagnosis for the current task.
 - Every risky plan must state Goal, Scope, Forbidden scope, touched files,
   security/idempotency risks, required gates/tests, deployment steps, rollback
   point, and success criteria.
@@ -51,9 +60,9 @@ Main VPS paths:
 
 ## Development Workflow
 
-For small read-only checks or typo/docs-only edits, keep the workflow compact.
-For non-trivial, production-facing, or risky changes, use the project
-mini-stage cycle and wait for explicit approval before implementation:
+For every task, first write the plan and wait for explicit owner approval. For
+small typo/docs-only tasks, the plan can be short. For non-trivial,
+production-facing, or risky changes, use the full project mini-stage cycle:
 
 1. Goal.
 2. Scope.
@@ -67,6 +76,30 @@ mini-stage cycle and wait for explicit approval before implementation:
 10. Update `docs/current-checkpoint.md` when project state changed.
 
 Use `docs/task-template.md` for larger tasks.
+
+## Mandatory Task Start Ritual
+
+Before any task work, output this block and stop:
+
+```text
+Task start:
+- Goal:
+- Scope:
+- Forbidden scope:
+- Risky areas:
+- Security / idempotency:
+- Planned files/services:
+- Gates / tests:
+- Deployment:
+- Rollback:
+- Success criteria:
+
+Waiting for owner approval.
+```
+
+Only after the owner explicitly confirms should the agent begin the approved
+work. Approval words can be informal, such as `го`, `делай`, `подтверждаю`, or
+`согласен`.
 
 ## Scope Discipline
 

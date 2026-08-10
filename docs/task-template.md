@@ -1,6 +1,8 @@
 # Task Template
 
-Use this template before medium or risky implementation work.
+Use this template before implementation work. The agent must fill it, stop, and
+wait for owner approval before inspecting, editing, testing, committing,
+deploying, restarting services, or calling real external systems.
 
 ```text
 CONTEXT:
@@ -32,5 +34,7 @@ QUALITY GATES:
 SUCCESS CRITERIA:
 
 REPORT FORMAT:
-```
 
+WAITING:
+Waiting for owner approval before starting work.
+```
