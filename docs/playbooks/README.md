@@ -12,8 +12,13 @@ workflow is active.
 - `automated-testing-strategy.md` - organize local, VPS, Telegram, Notion, and Gemini checks.
 - `security-gate.md` - baseline security checks and escalation triggers.
 
+## Transferable Practices
+
+Reusable versions of these practices live in
+`docs/transferable-practices/`. Use that folder when starting another small
+agent or automation pipeline.
+
 ## Rule
 
 Do not load every playbook for every change. Pick the smallest set that matches
 the touched area and keep the report compact.
-

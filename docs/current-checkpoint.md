@@ -75,6 +75,8 @@ source: telegram
 - Use `docs/playbooks/` for detailed development practices.
 - Use `docs/task-template.md` before medium/risky implementation tasks.
 - Use `docs/current-checkpoint.md` as the compact source of current operational truth.
+- Use `docs/transferable-practices/` as the reusable playbook set for building
+  another similar small agent or pipeline.
 
 ## Known Historical Issues Already Addressed
 
