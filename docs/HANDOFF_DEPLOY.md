@@ -464,3 +464,12 @@ This path is closer to the tested VPS setup because the project needs:
 
 Docker can be added later, but it should only be handed to a non-developer after a separate clean Docker smoke test.
 
+## 19. Future Deployment Testing
+
+Before changing the installer or testing deployment on a VPS that already runs production projects, read:
+
+- [`docs/deployment-testing/README.md`](deployment-testing/README.md)
+- [`docs/deployment-testing/conflict-matrix.md`](deployment-testing/conflict-matrix.md)
+- [`docs/deployment-testing/non-it-staging-checklist.md`](deployment-testing/non-it-staging-checklist.md)
+
+These notes document how to test the setup wizard safely without stealing the production Telegram webhook, writing into the production Notion page, or overwriting live Caddy/systemd state.
