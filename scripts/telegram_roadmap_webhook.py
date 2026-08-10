@@ -24,6 +24,7 @@ DEFAULT_REGISTRY_FILE = "/var/lib/zoom-audio-pipeline/telegram-run-registry.json
 DEFAULT_EVENTS_FILE = "/var/log/zoom-audio-pipeline/events.jsonl"
 DEFAULT_VOICE_PYTHON = "/root/codex-audio/nastya-a2/.venv/bin/python"
 DEFAULT_VOICE_TRANSCRIBER = "/usr/local/bin/transcribe-telegram-voice"
+DEFAULT_VOICE_TRANSCRIBE_TIMEOUT = 900
 DEFAULT_NOTION_ENV_FILE = "/root/.notion/notion.env"
 DEFAULT_TELEGRAM_INTAKE_DIR = "/var/lib/zoom-audio-pipeline/telegram-intake"
 DEFAULT_TELEGRAM_NOTION_INTAKE_STATE = "/var/lib/zoom-audio-pipeline/telegram-notion-intake.json"
@@ -585,12 +586,13 @@ def upload_audio_message_to_notion(config: dict[str, str], token: str, message: 
 def transcribe_voice(config: dict[str, str], audio_path: Path) -> str:
     python = config.get("voice_python", DEFAULT_VOICE_PYTHON)
     script = config.get("voice_transcriber", DEFAULT_VOICE_TRANSCRIBER)
+    timeout = int(config.get("voice_transcribe_timeout", str(DEFAULT_VOICE_TRANSCRIBE_TIMEOUT)))
     result = subprocess.run(
         [python, script, str(audio_path)],
         check=True,
         capture_output=True,
         text=True,
-        timeout=300,
+        timeout=timeout,
     )
     return result.stdout.strip()
 
@@ -1013,6 +1015,7 @@ def main() -> int:
         "events_file": args.events_file,
         "voice_python": env.get("TELEGRAM_VOICE_TRANSCRIBE_PYTHON", DEFAULT_VOICE_PYTHON),
         "voice_transcriber": env.get("TELEGRAM_VOICE_TRANSCRIBER", DEFAULT_VOICE_TRANSCRIBER),
+        "voice_transcribe_timeout": env.get("TELEGRAM_VOICE_TRANSCRIBE_TIMEOUT", str(DEFAULT_VOICE_TRANSCRIBE_TIMEOUT)),
         "notion_api_key": env.get("NOTION_API_KEY", ""),
         "notion_target": env.get("NOTION_TARGET", ""),
         "notion_env_file": args.notion_env_file,

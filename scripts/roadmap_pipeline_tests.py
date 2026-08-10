@@ -38,6 +38,7 @@ ARCHIVE_WORKER = load_module("telegram_notion_archive_worker", "scripts/telegram
 CLEANUP = load_module("telegram_intake_cleanup", "scripts/telegram_intake_cleanup.py")
 OPENROUTER_GENERATOR = load_module("openrouter_roadmap_generate", "scripts/openrouter_roadmap_generate.py")
 ENV_MIGRATOR = load_module("configure_pipeline_env_from_legacy", "scripts/configure_pipeline_env_from_legacy.py")
+VOICE_TRANSCRIBER = load_module("transcribe_telegram_voice", "scripts/transcribe_telegram_voice.py")
 
 
 VERIFICATION_MD = """# Проверка
@@ -148,6 +149,46 @@ class PromptRuleTests(unittest.TestCase):
         self.assertIn("какая будет обратная связь", prompt)
         self.assertIn("как обучение связано с интересами ученика", prompt)
         self.assertNotIn("считай это внутренней деталью согласования", prompt)
+
+
+class TelegramVoiceTranscriptionTests(unittest.TestCase):
+    def test_voice_transcriber_uses_openrouter_provider_without_local_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            audio = Path(tmp) / "voice.oga"
+            audio.write_bytes(b"audio")
+            argv = [
+                "transcribe_telegram_voice.py",
+                str(audio),
+                "--provider",
+                "openrouter",
+            ]
+            with patch.object(sys, "argv", argv), \
+                patch.object(VOICE_TRANSCRIBER, "transcribe_openrouter", return_value="teacher correction") as openrouter_mock, \
+                patch.object(VOICE_TRANSCRIBER, "transcribe_local") as local_mock, \
+                patch("sys.stdout", new_callable=io.StringIO) as stdout:
+                VOICE_TRANSCRIBER.main()
+
+        openrouter_mock.assert_called_once()
+        local_mock.assert_not_called()
+        self.assertEqual(stdout.getvalue().strip(), "teacher correction")
+
+    def test_webhook_voice_transcription_timeout_is_configurable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            audio = Path(tmp) / "voice.oga"
+            audio.write_bytes(b"audio")
+            with patch.object(WEBHOOK.subprocess, "run") as run_mock:
+                run_mock.return_value.stdout = "ok\n"
+                text = WEBHOOK.transcribe_voice(
+                    {
+                        "voice_python": "python3",
+                        "voice_transcriber": "transcribe-telegram-voice",
+                        "voice_transcribe_timeout": "777",
+                    },
+                    audio,
+                )
+
+        self.assertEqual(text, "ok")
+        self.assertEqual(run_mock.call_args.kwargs["timeout"], 777)
 
 
 class GeminiRewriteScriptTests(unittest.TestCase):
