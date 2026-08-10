@@ -431,16 +431,6 @@ def registry_entry_blocks_pipeline(entry: dict[str, Any]) -> bool:
 
 
 def extract_audio_message(message: dict[str, Any]) -> dict[str, Any] | None:
-    if message.get("voice"):
-        voice = message["voice"]
-        return {
-            "kind": "voice",
-            "file_id": voice.get("file_id", ""),
-            "file_unique_id": voice.get("file_unique_id", ""),
-            "file_name": "telegram-voice.oga",
-            "mime_type": "audio/ogg",
-            "file_size": voice.get("file_size"),
-        }
     if message.get("audio"):
         audio = message["audio"]
         return {
@@ -831,6 +821,20 @@ def make_handler(config: dict[str, str]):
             registry = load_json(registry_file, {"runs": {}})
             pending = registry.get("pending_reviews", {}).get(str(chat_id))
             if not pending:
+                if message.get("voice"):
+                    append_event(events_file, {
+                        "stage": "telegram_voice_without_pending_review",
+                        "chat_id": str(chat_id),
+                    })
+                    safe_telegram_request(token, "sendMessage", {
+                        "chat_id": chat_id,
+                        "text": (
+                            "Голосовое получил, но сейчас нет активной проверки, к которой можно применить правку. "
+                            "Если это созвон для нового roadmap, пришли его как аудиофайл или документ."
+                        ),
+                        "disable_web_page_preview": True,
+                    }, api_base_url=api_base_url)
+                    return
                 audio = extract_audio_message(message)
                 if not audio:
                     return

@@ -897,6 +897,31 @@ class WebhookApprovalTests(TempRunMixin, unittest.TestCase):
         sent_texts = [payload["text"] for method, payload in self.sent if method == "sendMessage"]
         self.assertTrue(any("Не смог принять аудио в pipeline" in text for text in sent_texts))
 
+    def test_voice_without_pending_is_not_accepted_as_new_pipeline_file(self) -> None:
+        self.registry.write_text(json.dumps({"runs": {}, "pending_reviews": {}}, ensure_ascii=False), encoding="utf-8")
+        message = {
+            "chat": {"id": 42},
+            "voice": {
+                "file_id": "voice-file",
+                "file_unique_id": "voice-unique",
+                "file_size": 123,
+            },
+        }
+
+        with patch.object(WEBHOOK, "accept_audio_message_for_pipeline") as accept_mock, \
+            patch.object(WEBHOOK, "start_notion_archive_worker_async") as worker_mock:
+            self.handler().handle_message(message)
+
+        self.assertIsNone(WEBHOOK.extract_audio_message(message))
+        accept_mock.assert_not_called()
+        self.start_mock.assert_not_called()
+        worker_mock.assert_not_called()
+        events = self.events.read_text(encoding="utf-8")
+        self.assertIn("telegram_voice_without_pending_review", events)
+        self.assertNotIn("telegram_intake_accepted", events)
+        sent_texts = [payload["text"] for method, payload in self.sent if method == "sendMessage"]
+        self.assertTrue(any("активной проверки" in text for text in sent_texts))
+
     def test_cloud_telegram_audio_above_20mb_is_rejected_before_download(self) -> None:
         self.registry.write_text(json.dumps({"runs": {}, "pending_reviews": {}}, ensure_ascii=False), encoding="utf-8")
         message = {
