@@ -34,6 +34,7 @@ DEFAULT_ENV_FILE = "/root/.telegram/roadmap-e2e.env"
 FALLBACK_ENV_FILE = "/opt/shorttalk/.runtime/telegram-e2e.env"
 DEFAULT_NOTIFY_SCRIPT = "/usr/local/bin/telegram-roadmap-notify"
 DEFAULT_RUNS_DIR = "/var/lib/zoom-audio-pipeline/runs"
+DEFAULT_INTAKE_STATE = "/var/lib/zoom-audio-pipeline/telegram-notion-intake.json"
 
 
 def read_env_file(path: Path) -> dict[str, str]:
@@ -54,7 +55,9 @@ def main() -> int:
     parser.add_argument("--env-file", default=os.environ.get("ROADMAP_REAL_TG_ENV_FILE", DEFAULT_ENV_FILE))
     parser.add_argument("--fallback-env-file", default=FALLBACK_ENV_FILE)
     parser.add_argument("--run-dir", default="")
-    parser.add_argument("--action", choices=["revise", "approve", "approve_only"], default="revise")
+    parser.add_argument("--action", choices=["revise", "approve", "approve_only", "large_file_intake"], default="revise")
+    parser.add_argument("--large-file-size-mb", type=int, default=23)
+    parser.add_argument("--intake-state", default=DEFAULT_INTAKE_STATE)
     parser.add_argument("--min-delay", type=float, default=2.0)
     parser.add_argument("--max-delay", type=float, default=5.0)
     parser.add_argument("--timeout", type=float, default=45.0)
@@ -88,6 +91,8 @@ def main() -> int:
         article_timeout=args.article_timeout,
         proxy_url=env.get("ROADMAP_REAL_TG_PROXY_URL", env.get("SHORTTALK_REAL_TG_PROXY_URL", "")),
         action=args.action,
+        large_file_size_mb=args.large_file_size_mb,
+        intake_state=args.intake_state,
     )
 
     with single_run_lock():
@@ -111,6 +116,8 @@ class SmokeConfig:
         article_timeout: float,
         proxy_url: str,
         action: str,
+        large_file_size_mb: int,
+        intake_state: str,
     ) -> None:
         self.api_id = api_id
         self.api_hash = api_hash
@@ -124,6 +131,8 @@ class SmokeConfig:
         self.article_timeout = article_timeout
         self.proxy_url = proxy_url
         self.action = action
+        self.large_file_size_mb = large_file_size_mb
+        self.intake_state = intake_state
 
 
 async def run_smoke(config: SmokeConfig) -> None:
@@ -147,6 +156,10 @@ async def run_smoke(config: SmokeConfig) -> None:
         await human_delay(config)
         await client.send_message(bot, "/start")
         await human_delay(config)
+
+        if config.action == "large_file_intake":
+            await run_large_file_intake_smoke(client, bot, config, marker)
+            return
 
         subprocess.run(
             [
@@ -195,6 +208,70 @@ async def run_smoke(config: SmokeConfig) -> None:
         raise RuntimeError(f"Telegram FloodWaitError: wait {exc.seconds} seconds before retrying") from exc
     finally:
         await client.disconnect()
+
+
+async def run_large_file_intake_smoke(client: TelegramClient, bot, config: SmokeConfig, marker: str) -> None:
+    if config.large_file_size_mb <= 20:
+        raise ValueError("--large-file-size-mb must be above 20 to test Local Bot API intake")
+    before = load_intake_ids(Path(config.intake_state))
+    with tempfile.TemporaryDirectory() as tmp:
+        audio_path = Path(tmp) / f"{marker}.m4a"
+        create_sparse_audio_fixture(audio_path, config.large_file_size_mb)
+        await human_delay(config)
+        await client.send_file(bot, audio_path, caption=f"Local Bot API large file smoke {marker}")
+    await wait_bot_message(client, bot, "Файл принят.", config.timeout)
+    record = await wait_for_new_intake(Path(config.intake_state), before, marker, config.timeout)
+    inbox_path = record.get("inbox_path", "")
+    local_path = record.get("local_path", "")
+    if record.get("pipeline_status") != "pipeline_started":
+        raise AssertionError(f"Expected pipeline_started, got {record.get('pipeline_status')!r}")
+    if not inbox_path or not Path(str(inbox_path)).exists():
+        raise AssertionError(f"Expected inbox file to exist: {inbox_path}")
+    if not local_path or not Path(str(local_path)).exists():
+        raise AssertionError(f"Expected local intake file to exist: {local_path}")
+    size = Path(str(inbox_path)).stat().st_size
+    if size <= 20 * 1024 * 1024:
+        raise AssertionError(f"Expected inbox file above 20 MiB, got {size} bytes")
+    print("ok - large Telegram file accepted through Local Bot API")
+    print(f"ok - intake file: {Path(str(inbox_path)).name}")
+
+
+def create_sparse_audio_fixture(path: Path, size_mb: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as handle:
+        handle.write(b"\x00\x00\x00\x18ftypM4A \x00\x00\x00\x00M4A mp42")
+        handle.seek(size_mb * 1024 * 1024 - 1)
+        handle.write(b"\0")
+
+
+def load_intake_ids(state_path: Path) -> set[str]:
+    if not state_path.exists():
+        return set()
+    try:
+        data = json.loads(state_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return set()
+    files = data.get("files", {}) if isinstance(data, dict) else {}
+    return set(files.keys()) if isinstance(files, dict) else set()
+
+
+async def wait_for_new_intake(state_path: Path, before: set[str], marker: str, timeout: float) -> dict[str, object]:
+    deadline = asyncio.get_event_loop().time() + timeout
+    while asyncio.get_event_loop().time() < deadline:
+        if state_path.exists():
+            try:
+                data = json.loads(state_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                data = {}
+            files = data.get("files", {}) if isinstance(data, dict) else {}
+            if isinstance(files, dict):
+                for intake_id, record in files.items():
+                    if intake_id in before or not isinstance(record, dict):
+                        continue
+                    if marker in str(record.get("file_name", "")):
+                        return record
+        await asyncio.sleep(1)
+    raise TimeoutError(f"Timed out waiting for Telegram intake marker {marker}")
 
 
 async def wait_bot_message(client: TelegramClient, bot, expected_fragment: str, timeout: float):
