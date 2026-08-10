@@ -2,6 +2,32 @@
 
 These rules are the operating guide for Codex work in this project.
 
+## Hard Rules
+
+These rules override speed and convenience.
+
+- For any production-facing or risky change, do not edit code, commit, push,
+  deploy, restart services, migrate state, or run real Telegram/Notion actions
+  until the plan is written and explicitly approved by the owner.
+- Risky always includes Telegram bot behavior, Notion intake/archive, VPS
+  systemd/Caddy/runtime paths, webhooks, secrets/env handling, Local Bot API,
+  OpenRouter/Gemini/Codex routing, cleanup/deletion, state/idempotency, and
+  public HTML/PDF delivery.
+- Read-only diagnosis is allowed before approval when needed to understand the
+  issue. Keep it read-only: logs, status files, service status, git diff, and
+  source reads.
+- Every risky plan must state Goal, Scope, Forbidden scope, touched files,
+  security/idempotency risks, required gates/tests, deployment steps, rollback
+  point, and success criteria.
+- Security gate is mandatory for risky work. It is not optional and cannot be
+  replaced by a generic test run.
+- Telegram behavior changes require a Telegram gate: unit tests plus fake or
+  real smoke as appropriate. If real smoke is skipped, report why and what risk
+  remains.
+- If two attempts fail on the same issue, stop implementation and replan before
+  changing more code.
+- Stage-close report is required before calling the work done.
+
 ## Project Shape
 
 This project automates student roadmap creation from Zoom/Telegram/Notion audio:
@@ -25,8 +51,9 @@ Main VPS paths:
 
 ## Development Workflow
 
-For small changes, keep the workflow compact. For non-trivial changes, use the
-project mini-stage cycle:
+For small read-only checks or typo/docs-only edits, keep the workflow compact.
+For non-trivial, production-facing, or risky changes, use the project
+mini-stage cycle and wait for explicit approval before implementation:
 
 1. Goal.
 2. Scope.
@@ -110,4 +137,3 @@ For medium or risky implementation work, write the task like a builder prompt:
 - report format.
 
 If two attempts fail on the same issue, stop and replan instead of continuing to patch blindly.
-
