@@ -6,7 +6,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 Environment=PIPELINE_ENV_FILE=/etc/zoom-audio-pipeline/pipeline.env
-ExecStart=/usr/local/bin/telegram-roadmap-webhook
+ExecStart=/usr/local/bin/telegram-roadmap-webhook --env-file /etc/zoom-audio-pipeline/pipeline.env --notion-env-file /etc/zoom-audio-pipeline/pipeline.env
 Restart=always
 RestartSec=3
 User=root
@@ -16,4 +16,3 @@ StandardError=append:/var/log/zoom-audio-pipeline/telegram-webhook.log
 
 [Install]
 WantedBy=multi-user.target
-

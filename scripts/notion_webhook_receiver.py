@@ -90,7 +90,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self) -> None:
-        if self.path == "/health":
+        if self.path in {"/health", "/notion/health"}:
             self.respond(200, {"ok": True})
         else:
             self.respond(404, {"ok": False, "error": "not_found"})

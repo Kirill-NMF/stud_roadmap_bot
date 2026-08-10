@@ -38,6 +38,7 @@ Required secrets in `/etc/zoom-audio-pipeline/pipeline.env`:
 - `NOTION_API_KEY`
 - `NOTION_TARGET`
 - `OPENROUTER_API_KEY`
+- `ROADMAP_PUBLIC_BASE_URL`
 
 Do not commit real env files.
 

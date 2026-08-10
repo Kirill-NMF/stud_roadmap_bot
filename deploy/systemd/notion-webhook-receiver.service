@@ -6,7 +6,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 Environment=PIPELINE_ENV_FILE=/etc/zoom-audio-pipeline/pipeline.env
-ExecStart=/usr/local/bin/notion-webhook-receiver
+ExecStart=/usr/local/bin/notion-webhook-receiver --env-file /etc/zoom-audio-pipeline/pipeline.env --webhook-env-file /etc/zoom-audio-pipeline/notion-webhook.env
 Restart=always
 RestartSec=3
 User=root
@@ -16,4 +16,3 @@ StandardError=append:/var/log/zoom-audio-pipeline/notion-webhook.log
 
 [Install]
 WantedBy=multi-user.target
-

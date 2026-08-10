@@ -207,10 +207,16 @@ class OpenRouterRoadmapGeneratorTests(unittest.TestCase):
     def test_pipeline_runner_is_env_configurable_and_defaults_to_openrouter_generation(self) -> None:
         runner = (ROOT / "scripts/notion_pipeline_runner.sh").read_text(encoding="utf-8")
         self.assertIn("/etc/zoom-audio-pipeline/pipeline.env", runner)
+        self.assertIn('telegram-notion-archive-worker --env-file "$ENV_FILE"', runner)
+        self.assertIn('notion-pull-audio --env-file "$ENV_FILE"', runner)
         self.assertIn("VERIFICATION_SCRIPT:-/usr/local/bin/generate-verification-with-openrouter", runner)
         self.assertIn("ARTICLE_DRAFT_SCRIPT:-/usr/local/bin/generate-article-with-openrouter", runner)
         self.assertIn('process-approved-roadmaps --article-script "$ARTICLE_SCRIPT"', runner)
         self.assertNotIn("/root/codex-audio/nastya-a2/.venv/bin/python", runner)
+
+    def test_notion_webhook_supports_public_health_path(self) -> None:
+        receiver = (ROOT / "scripts/notion_webhook_receiver.py").read_text(encoding="utf-8")
+        self.assertIn('"/notion/health"', receiver)
 
     def test_packaging_installer_contains_required_files(self) -> None:
         installer = (ROOT / "scripts/install_vps.sh").read_text(encoding="utf-8")
@@ -232,10 +238,63 @@ class OpenRouterRoadmapGeneratorTests(unittest.TestCase):
             self.assertIn(expected, installer)
         self.assertIn("TELEGRAM_BOT_TOKEN", doctor)
         self.assertIn("OPENROUTER_API_KEY", doctor)
+        self.assertIn("ROADMAP_PUBLIC_BASE_URL", doctor)
         self.assertIn("python3 scripts/roadmap_pipeline_tests.py", workflow)
         self.assertTrue((ROOT / "scripts/bootstrap_ubuntu.sh").exists())
         self.assertTrue((ROOT / "docs/HANDOFF_DEPLOY.md").exists())
         self.assertTrue((ROOT / "deploy/Caddyfile.example").exists())
+
+    def test_service_templates_use_single_pipeline_env_file(self) -> None:
+        telegram_service = (ROOT / "deploy/systemd/telegram-roadmap-webhook.service").read_text(encoding="utf-8")
+        notion_service = (ROOT / "deploy/systemd/notion-webhook-receiver.service").read_text(encoding="utf-8")
+        self.assertIn("--env-file /etc/zoom-audio-pipeline/pipeline.env", telegram_service)
+        self.assertIn("--notion-env-file /etc/zoom-audio-pipeline/pipeline.env", telegram_service)
+        self.assertIn("--env-file /etc/zoom-audio-pipeline/pipeline.env", notion_service)
+        self.assertIn("--webhook-env-file /etc/zoom-audio-pipeline/notion-webhook.env", notion_service)
+
+    def test_notify_can_take_public_base_url_from_env_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "run"
+            run_dir.mkdir()
+            (run_dir / "verification.md").write_text(VERIFICATION_MD, encoding="utf-8")
+            env_file = root / "pipeline.env"
+            env_file.write_text(
+                "\n".join([
+                    "TELEGRAM_BOT_TOKEN=token",
+                    "TELEGRAM_CHAT_ID=42",
+                    "ROADMAP_PUBLIC_BASE_URL=https://roadmap.example.com/roadmap-reader",
+                ]),
+                encoding="utf-8",
+            )
+            sent: list[dict[str, object]] = []
+
+            def fake_telegram_request(_token: str, method: str, payload: dict[str, object] | None = None):
+                if method == "sendMessage" and payload:
+                    sent.append(payload)
+                return {"ok": True, "result": {"message_id": 101}}
+
+            with patch.object(sys, "argv", [
+                "telegram_roadmap_notify.py",
+                "--env-file",
+                str(env_file),
+                "--stage",
+                "verification_ready",
+                "--audio",
+                "lesson.m4a",
+                "--run-dir",
+                str(run_dir),
+                "--registry-file",
+                str(root / "registry.json"),
+                "--public-root",
+                str(root / "public"),
+            ]), \
+                patch.object(NOTIFY, "telegram_request", side_effect=fake_telegram_request), \
+                patch.object(NOTIFY.subprocess, "run"):
+                self.assertEqual(NOTIFY.main(), 0)
+
+        url = sent[-1]["reply_markup"]["inline_keyboard"][0][0]["web_app"]["url"]  # type: ignore[index]
+        self.assertTrue(str(url).startswith("https://roadmap.example.com/roadmap-reader/"))
 
 
 class OpenRouterTranscriptionTests(unittest.TestCase):

@@ -36,10 +36,10 @@ fi
 
 {
   echo "$(date -Is) telegram-notion-archive-worker start"
-  /usr/local/bin/telegram-notion-archive-worker || true
+  /usr/local/bin/telegram-notion-archive-worker --env-file "$ENV_FILE" || true
   echo "$(date -Is) telegram-notion-archive-worker done"
   echo "$(date -Is) notion-pull-audio start"
-  /usr/local/bin/notion-pull-audio --output-dir "$INBOX_DIR" --state-file "$STATE_FILE"
+  /usr/local/bin/notion-pull-audio --env-file "$ENV_FILE" --output-dir "$INBOX_DIR" --state-file "$STATE_FILE"
   echo "$(date -Is) notion-pull-audio done"
   echo "$(date -Is) process-new-audio start"
   "$PIPELINE_PYTHON" /usr/local/bin/process-new-audio \

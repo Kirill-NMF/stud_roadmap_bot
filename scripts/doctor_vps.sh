@@ -66,7 +66,7 @@ for dir in \
 done
 
 if [[ -s "$ENV_FILE" ]]; then
-  for key in TELEGRAM_BOT_TOKEN NOTION_API_KEY NOTION_TARGET OPENROUTER_API_KEY; do
+  for key in TELEGRAM_BOT_TOKEN TELEGRAM_WEBHOOK_SECRET TELEGRAM_CHAT_ID NOTION_API_KEY NOTION_TARGET OPENROUTER_API_KEY ROADMAP_PUBLIC_BASE_URL; do
     check "env $key configured" require_env_key "$key"
   done
 fi

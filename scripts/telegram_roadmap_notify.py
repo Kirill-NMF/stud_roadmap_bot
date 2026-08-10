@@ -570,8 +570,8 @@ def main() -> int:
     parser.add_argument("--audio", default="")
     parser.add_argument("--run-dir", default="")
     parser.add_argument("--registry-file", default=DEFAULT_REGISTRY_FILE)
-    parser.add_argument("--public-root", default=DEFAULT_PUBLIC_ROOT)
-    parser.add_argument("--public-base-url", default=DEFAULT_PUBLIC_BASE_URL)
+    parser.add_argument("--public-root", default="")
+    parser.add_argument("--public-base-url", default="")
     parser.add_argument("--get-me", action="store_true")
     parser.add_argument("--get-updates", action="store_true")
     parser.add_argument("--set-webhook", default="")
@@ -617,6 +617,8 @@ def main() -> int:
     text = args.text
     reply_markup = None
     public_url = ""
+    public_root = Path(args.public_root or env.get("ROADMAP_PUBLIC_ROOT", DEFAULT_PUBLIC_ROOT))
+    public_base_url = args.public_base_url or env.get("ROADMAP_PUBLIC_BASE_URL", DEFAULT_PUBLIC_BASE_URL)
 
     if args.stage == "transcript_ready":
         if not args.audio or not args.run_dir:
@@ -641,7 +643,7 @@ def main() -> int:
         }
         save_json(Path(args.registry_file), registry)
         brief_path = write_verification_brief(run_dir, args.audio)
-        public_url = publish_markdown(brief_path, "verification", Path(args.public_root), args.public_base_url)
+        public_url = publish_markdown(brief_path, "verification", public_root, public_base_url)
         text = build_verification_message(run_dir, args.audio)
         keyboard: list[list[dict[str, object]]] = []
         if public_url:
@@ -653,7 +655,7 @@ def main() -> int:
         if not args.audio or not args.run_dir:
             print("--audio and --run-dir are required for article_ready", file=sys.stderr)
             return 2
-        public_url = publish_markdown(run_dir / "roadmap-article.md", "article", Path(args.public_root), args.public_base_url)
+        public_url = publish_markdown(run_dir / "roadmap-article.md", "article", public_root, public_base_url)
         text = build_article_message(run_dir, args.audio)
         article_pdf = ensure_article_pdf(run_dir)
         if public_url:
