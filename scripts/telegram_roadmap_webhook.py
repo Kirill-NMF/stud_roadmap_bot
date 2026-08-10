@@ -33,6 +33,27 @@ DEFAULT_TELEGRAM_MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024
 NOTION_UPLOAD_VERSION = "2026-03-11"
 
 
+class TelegramFileTooLargeError(RuntimeError):
+    def __init__(self, file_size: int, max_bytes: int):
+        self.file_size = file_size
+        self.max_bytes = max_bytes
+        super().__init__(f"Telegram file is too large for bot download: {file_size} bytes")
+
+
+def format_mb(size_bytes: int) -> str:
+    return f"{size_bytes / 1024 / 1024:.1f} MB"
+
+
+def telegram_file_too_large_message(file_size: int, max_bytes: int) -> str:
+    return (
+        "Файл вижу, но не могу скачать его через Telegram Bot API: "
+        f"размер {format_mb(file_size)}, лимит {format_mb(max_bytes)}.\n\n"
+        "Что можно сделать сейчас: отправь файл через Notion, сожми аудио до лимита "
+        "или разбей запись на части. Для больших файлов через этого же бота нужно "
+        "отдельно подключать Telegram-клиент, не только Bot API."
+    )
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
@@ -147,7 +168,7 @@ def download_telegram_file(
         raise RuntimeError("Telegram getFile did not return file_path")
     file_size = result.get("file_size")
     if max_bytes and isinstance(file_size, int) and file_size > max_bytes:
-        raise RuntimeError(f"Telegram file is too large for bot download: {file_size} bytes")
+        raise TelegramFileTooLargeError(file_size, max_bytes)
     url = f"https://api.telegram.org/file/bot{token}/{file_path}"
     destination.parent.mkdir(parents=True, exist_ok=True)
     request = urllib.request.Request(url, method="GET")
@@ -156,7 +177,7 @@ def download_telegram_file(
     if max_bytes and destination.stat().st_size > max_bytes:
         actual_size = destination.stat().st_size
         destination.unlink(missing_ok=True)
-        raise RuntimeError(f"Telegram file is too large for bot download: {actual_size} bytes")
+        raise TelegramFileTooLargeError(actual_size, max_bytes)
 
 
 def page_id_from_target(target: str) -> str:
@@ -386,7 +407,7 @@ def accept_audio_message_for_pipeline(config: dict[str, str], token: str, messag
     max_bytes = int(config.get("telegram_max_download_bytes", str(DEFAULT_TELEGRAM_MAX_DOWNLOAD_BYTES)))
     file_size = audio.get("file_size")
     if isinstance(file_size, int) and file_size > max_bytes:
-        raise RuntimeError(f"Файл больше лимита Telegram Bot API для скачивания ботом: {file_size} bytes")
+        raise TelegramFileTooLargeError(file_size, max_bytes)
 
     state_path = Path(config.get("telegram_notion_intake_state", DEFAULT_TELEGRAM_NOTION_INTAKE_STATE))
     state = load_json(state_path, {"files": {}})
@@ -711,6 +732,22 @@ def make_handler(config: dict[str, str]):
                 audio = extract_audio_message(message)
                 if not audio:
                     return
+                max_bytes = int(config.get("telegram_max_download_bytes", str(DEFAULT_TELEGRAM_MAX_DOWNLOAD_BYTES)))
+                file_size = audio.get("file_size")
+                if isinstance(file_size, int) and file_size > max_bytes:
+                    append_event(events_file, {
+                        "stage": "telegram_intake_rejected",
+                        "chat_id": str(chat_id),
+                        "reason": "file_too_large",
+                        "file_size": file_size,
+                        "max_bytes": max_bytes,
+                    })
+                    safe_telegram_request(token, "sendMessage", {
+                        "chat_id": chat_id,
+                        "text": telegram_file_too_large_message(file_size, max_bytes),
+                        "disable_web_page_preview": True,
+                    })
+                    return
                 safe_telegram_request(token, "sendMessage", {
                     "chat_id": chat_id,
                     "text": "Аудио получил. Запускаю pipeline, а файл отдельно архивирую в Notion.",
@@ -718,6 +755,20 @@ def make_handler(config: dict[str, str]):
                 })
                 try:
                     result = accept_audio_message_for_pipeline(config, token, message)
+                except TelegramFileTooLargeError as error:
+                    append_event(events_file, {
+                        "stage": "telegram_intake_rejected",
+                        "chat_id": str(chat_id),
+                        "reason": "file_too_large",
+                        "file_size": error.file_size,
+                        "max_bytes": error.max_bytes,
+                    })
+                    safe_telegram_request(token, "sendMessage", {
+                        "chat_id": chat_id,
+                        "text": telegram_file_too_large_message(error.file_size, error.max_bytes),
+                        "disable_web_page_preview": True,
+                    })
+                    return
                 except Exception as error:
                     append_event(events_file, {
                         "stage": "telegram_intake_failed",

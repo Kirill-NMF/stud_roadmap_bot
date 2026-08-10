@@ -794,6 +794,33 @@ class WebhookApprovalTests(TempRunMixin, unittest.TestCase):
         sent_texts = [payload["text"] for method, payload in self.sent if method == "sendMessage"]
         self.assertTrue(any("Не смог принять аудио в pipeline" in text for text in sent_texts))
 
+    def test_large_audio_without_pending_reports_limit_without_starting_pipeline(self) -> None:
+        self.registry.write_text(json.dumps({"runs": {}, "pending_reviews": {}}, ensure_ascii=False), encoding="utf-8")
+        message = {
+            "chat": {"id": 42},
+            "document": {
+                "file_id": "file-id",
+                "file_unique_id": "unique-id",
+                "file_name": "huge.m4a",
+                "mime_type": "audio/mp4",
+                "file_size": 21 * 1024 * 1024,
+            },
+        }
+
+        with patch.object(WEBHOOK, "accept_audio_message_for_pipeline") as accept_mock, \
+            patch.object(WEBHOOK, "start_notion_archive_worker_async") as worker_mock:
+            self.handler().handle_message(message)
+
+        accept_mock.assert_not_called()
+        self.start_mock.assert_not_called()
+        worker_mock.assert_not_called()
+        events = self.events.read_text(encoding="utf-8")
+        self.assertIn("telegram_intake_rejected", events)
+        self.assertIn("file_too_large", events)
+        sent_texts = [payload["text"] for method, payload in self.sent if method == "sendMessage"]
+        self.assertTrue(any("Telegram Bot API" in text and "лимит" in text for text in sent_texts))
+        self.assertFalse(any("Аудио получил" in text for text in sent_texts))
+
     def test_pending_audio_remains_teacher_correction_not_notion_intake(self) -> None:
         with patch.object(WEBHOOK, "correction_text_from_message", return_value=("P1 добавить", "voice")), \
             patch.object(WEBHOOK, "accept_audio_message_for_pipeline") as accept_mock:
@@ -880,7 +907,7 @@ class TelegramNotionIntakeTests(unittest.TestCase):
 
     def test_large_audio_message_is_rejected_before_download(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, patch.object(WEBHOOK, "download_telegram_file") as download_mock:
-            with self.assertRaisesRegex(RuntimeError, "больше лимита"):
+            with self.assertRaises(WEBHOOK.TelegramFileTooLargeError) as caught:
                 WEBHOOK.accept_audio_message_for_pipeline(
                     {
                         "telegram_notion_intake_state": str(Path(tmp) / "state.json"),
@@ -900,6 +927,8 @@ class TelegramNotionIntakeTests(unittest.TestCase):
                         }
                     },
                 )
+        self.assertEqual(caught.exception.file_size, 11)
+        self.assertEqual(caught.exception.max_bytes, 10)
         download_mock.assert_not_called()
 
 
