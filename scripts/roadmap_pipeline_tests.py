@@ -794,6 +794,34 @@ class WebhookApprovalTests(TempRunMixin, unittest.TestCase):
         sent_texts = [payload["text"] for method, payload in self.sent if method == "sendMessage"]
         self.assertTrue(any("Не смог принять аудио в pipeline" in text for text in sent_texts))
 
+    def test_telegram_audio_slightly_above_20mb_uses_default_intake_limit(self) -> None:
+        self.registry.write_text(json.dumps({"runs": {}, "pending_reviews": {}}, ensure_ascii=False), encoding="utf-8")
+        result = {
+            "status": "accepted",
+            "intake_id": "telegram:unique-id",
+            "file_name": "zoom-call.m4a",
+            "local_path": "/var/lib/zoom-audio-pipeline/telegram-intake/zoom-call.m4a",
+            "inbox_path": "/var/lib/zoom-audio-pipeline/inbox/zoom-call.m4a",
+        }
+        message = {
+            "chat": {"id": 42},
+            "document": {
+                "file_id": "file-id",
+                "file_unique_id": "unique-id",
+                "file_name": "zoom-call.m4a",
+                "mime_type": "audio/mp4",
+                "file_size": 21 * 1024 * 1024,
+            },
+        }
+
+        with patch.object(WEBHOOK, "accept_audio_message_for_pipeline", return_value=result) as accept_mock, \
+            patch.object(WEBHOOK, "start_notion_archive_worker_async") as worker_mock:
+            self.handler().handle_message(message)
+
+        accept_mock.assert_called_once()
+        self.start_mock.assert_called_once()
+        worker_mock.assert_called_once()
+
     def test_large_audio_without_pending_reports_limit_without_starting_pipeline(self) -> None:
         self.registry.write_text(json.dumps({"runs": {}, "pending_reviews": {}}, ensure_ascii=False), encoding="utf-8")
         message = {
@@ -803,7 +831,7 @@ class WebhookApprovalTests(TempRunMixin, unittest.TestCase):
                 "file_unique_id": "unique-id",
                 "file_name": "huge.m4a",
                 "mime_type": "audio/mp4",
-                "file_size": 21 * 1024 * 1024,
+                "file_size": 51 * 1024 * 1024,
             },
         }
 
@@ -818,7 +846,7 @@ class WebhookApprovalTests(TempRunMixin, unittest.TestCase):
         self.assertIn("telegram_intake_rejected", events)
         self.assertIn("file_too_large", events)
         sent_texts = [payload["text"] for method, payload in self.sent if method == "sendMessage"]
-        self.assertTrue(any("Telegram Bot API" in text and "лимит" in text for text in sent_texts))
+        self.assertTrue(any("текущего лимита скачивания бота" in text and "лимит" in text for text in sent_texts))
         self.assertFalse(any("Аудио получил" in text for text in sent_texts))
 
     def test_pending_audio_remains_teacher_correction_not_notion_intake(self) -> None:

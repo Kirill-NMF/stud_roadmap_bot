@@ -29,7 +29,7 @@ DEFAULT_TELEGRAM_INTAKE_DIR = "/var/lib/zoom-audio-pipeline/telegram-intake"
 DEFAULT_TELEGRAM_NOTION_INTAKE_STATE = "/var/lib/zoom-audio-pipeline/telegram-notion-intake.json"
 DEFAULT_INBOX_DIR = "/var/lib/zoom-audio-pipeline/inbox"
 DEFAULT_NOTION_ARCHIVE_WORKER = "/usr/local/bin/telegram-notion-archive-worker"
-DEFAULT_TELEGRAM_MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024
+DEFAULT_TELEGRAM_MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024
 NOTION_UPLOAD_VERSION = "2026-03-11"
 
 
@@ -46,11 +46,11 @@ def format_mb(size_bytes: int) -> str:
 
 def telegram_file_too_large_message(file_size: int, max_bytes: int) -> str:
     return (
-        "Файл вижу, но не могу скачать его через Telegram Bot API: "
+        "Файл вижу, но он больше текущего лимита скачивания бота: "
         f"размер {format_mb(file_size)}, лимит {format_mb(max_bytes)}.\n\n"
         "Что можно сделать сейчас: отправь файл через Notion, сожми аудио до лимита "
-        "или разбей запись на части. Для больших файлов через этого же бота нужно "
-        "отдельно подключать Telegram-клиент, не только Bot API."
+        "или разбей запись на части. Если хочешь регулярно отправлять очень большие "
+        "файлы прямо в Telegram, нужно отдельно подключать Telegram-клиент для intake."
     )
 
 
@@ -173,11 +173,17 @@ def download_telegram_file(
     destination.parent.mkdir(parents=True, exist_ok=True)
     request = urllib.request.Request(url, method="GET")
     with urllib.request.urlopen(request, timeout=60) as response:
-        destination.write_bytes(response.read())
-    if max_bytes and destination.stat().st_size > max_bytes:
-        actual_size = destination.stat().st_size
-        destination.unlink(missing_ok=True)
-        raise TelegramFileTooLargeError(actual_size, max_bytes)
+        bytes_written = 0
+        with destination.open("wb") as handle:
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                bytes_written += len(chunk)
+                if max_bytes and bytes_written > max_bytes:
+                    destination.unlink(missing_ok=True)
+                    raise TelegramFileTooLargeError(bytes_written, max_bytes)
+                handle.write(chunk)
 
 
 def page_id_from_target(target: str) -> str:
@@ -890,7 +896,7 @@ def main() -> int:
     parser.add_argument("--telegram-notion-intake-state", default=DEFAULT_TELEGRAM_NOTION_INTAKE_STATE)
     parser.add_argument("--inbox-dir", default=DEFAULT_INBOX_DIR)
     parser.add_argument("--notion-archive-worker", default=DEFAULT_NOTION_ARCHIVE_WORKER)
-    parser.add_argument("--telegram-max-download-mb", type=int, default=20)
+    parser.add_argument("--telegram-max-download-mb", type=int, default=50)
     args = parser.parse_args()
 
     env = {**load_env(Path(args.notion_env_file)), **load_env(Path(args.env_file)), **os.environ}
