@@ -13,12 +13,18 @@ ENV_DIR="/etc/zoom-audio-pipeline"
 DATA_DIR="/var/lib/zoom-audio-pipeline"
 LOG_DIR="/var/log/zoom-audio-pipeline"
 PUBLIC_DIR="/var/www/roadmap-reader"
+LOCAL_BOT_API_DIR="/var/lib/telegram-bot-api"
 
-install -d "$BIN_DIR" "$OPT_DIR/prompts" "$ENV_DIR" "$DATA_DIR/inbox" "$DATA_DIR/runs" "$LOG_DIR" "$PUBLIC_DIR"
+install -d "$BIN_DIR" "$OPT_DIR/prompts" "$ENV_DIR" "$DATA_DIR/inbox" "$DATA_DIR/runs" "$LOG_DIR" "$PUBLIC_DIR" "$LOCAL_BOT_API_DIR"
 
 if command -v apt-get >/dev/null 2>&1; then
   apt-get update
   apt-get install -y python3 ffmpeg wkhtmltopdf caddy ca-certificates
+  if apt-cache show telegram-bot-api >/dev/null 2>&1; then
+    apt-get install -y telegram-bot-api
+  else
+    echo "telegram-bot-api package is not available via apt; install the binary before enabling telegram-bot-api-local.service." >&2
+  fi
 fi
 
 install -m 0755 "$ROOT_DIR/scripts/notion_pull_audio.py" "$BIN_DIR/notion-pull-audio"
@@ -50,6 +56,7 @@ fi
 
 install -m 0644 "$ROOT_DIR/deploy/systemd/notion-pipeline-poll.service" /etc/systemd/system/notion-pipeline-poll.service
 install -m 0644 "$ROOT_DIR/deploy/systemd/notion-pipeline-poll.timer" /etc/systemd/system/notion-pipeline-poll.timer
+install -m 0644 "$ROOT_DIR/deploy/systemd/telegram-bot-api-local.service" /etc/systemd/system/telegram-bot-api-local.service
 install -m 0644 "$ROOT_DIR/deploy/systemd/telegram-roadmap-webhook.service" /etc/systemd/system/telegram-roadmap-webhook.service
 install -m 0644 "$ROOT_DIR/deploy/systemd/notion-webhook-receiver.service" /etc/systemd/system/notion-webhook-receiver.service
 
@@ -70,4 +77,5 @@ echo "Installed roadmap pipeline."
 echo "Next:"
 echo "1. Edit $ENV_DIR/pipeline.env"
 echo "2. Run: roadmap-pipeline-doctor"
-echo "3. Enable: systemctl enable --now telegram-roadmap-webhook.service notion-pipeline-poll.timer"
+echo "3. For large Telegram files, set TELEGRAM_API_BASE_URL=http://127.0.0.1:8081 and enable telegram-bot-api-local.service"
+echo "4. Enable: systemctl enable --now telegram-roadmap-webhook.service notion-pipeline-poll.timer"

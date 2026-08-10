@@ -20,6 +20,7 @@ DEFAULT_ENV_FILE = "/root/.telegram/roadmap-bot.env"
 DEFAULT_REGISTRY_FILE = "/var/lib/zoom-audio-pipeline/telegram-run-registry.json"
 DEFAULT_PUBLIC_ROOT = "/var/www/roadmap-reader"
 DEFAULT_PUBLIC_BASE_URL = "https://dev.short-talk.space/roadmap-reader"
+DEFAULT_TELEGRAM_API_BASE_URL = "https://api.telegram.org"
 TELEGRAM_MESSAGE_LIMIT = 4096
 VERIFICATION_BRIEF_FILE = "verification-brief.md"
 
@@ -37,8 +38,22 @@ def load_env(path: Path) -> dict[str, str]:
     return values
 
 
-def telegram_request(token: str, method: str, payload: dict[str, object] | None = None) -> dict[str, object]:
-    url = f"https://api.telegram.org/bot{token}/{method}"
+def telegram_api_base_url(value: str | None = None) -> str:
+    return (value or DEFAULT_TELEGRAM_API_BASE_URL).rstrip("/")
+
+
+def telegram_method_url(token: str, method: str, api_base_url: str | None = None) -> str:
+    return f"{telegram_api_base_url(api_base_url)}/bot{token}/{method}"
+
+
+def telegram_request(
+    token: str,
+    method: str,
+    payload: dict[str, object] | None = None,
+    *,
+    api_base_url: str | None = None,
+) -> dict[str, object]:
+    url = telegram_method_url(token, method, api_base_url)
     data = None
     headers = {}
     if payload is not None:
@@ -56,6 +71,7 @@ def telegram_multipart_request(
     file_field: str,
     file_path: Path,
     display_filename: str | None = None,
+    api_base_url: str | None = None,
 ) -> dict[str, object]:
     boundary = "----CodexRoadmapBoundary" + hashlib.sha1(str(file_path).encode("utf-8")).hexdigest()
     body = bytearray()
@@ -84,7 +100,7 @@ def telegram_multipart_request(
     body.extend(f"--{boundary}--\r\n".encode("utf-8"))
 
     request = urllib.request.Request(
-        f"https://api.telegram.org/bot{token}/{method}",
+        telegram_method_url(token, method, api_base_url),
         data=bytes(body),
         headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
         method="POST",
@@ -537,6 +553,7 @@ def send_text_messages(
     *,
     reply_markup: dict[str, object] | None = None,
     parse_mode: str = "",
+    api_base_url: str | None = None,
 ) -> dict[str, object]:
     messages = split_messages(text)
     if not messages:
@@ -552,7 +569,7 @@ def send_text_messages(
             payload["parse_mode"] = parse_mode
         if reply_markup and index == len(messages) - 1:
             payload["reply_markup"] = reply_markup
-        last_result = telegram_request(token, "sendMessage", payload)
+        last_result = telegram_request(token, "sendMessage", payload, api_base_url=api_base_url)
     return last_result
 
 
@@ -580,18 +597,19 @@ def main() -> int:
 
     env = {**load_env(Path(args.env_file)), **os.environ}
     token = env.get("TELEGRAM_BOT_TOKEN")
+    api_base_url = telegram_api_base_url(env.get("TELEGRAM_API_BASE_URL"))
     chat_id = args.chat_id or env.get("TELEGRAM_CHAT_ID", "")
     if not token:
         print("TELEGRAM_BOT_TOKEN is not configured", file=sys.stderr)
         return 2
 
     if args.get_me:
-        result = telegram_request(token, "getMe")
+        result = telegram_request(token, "getMe", api_base_url=api_base_url)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
 
     if args.get_updates:
-        result = telegram_request(token, "getUpdates")
+        result = telegram_request(token, "getUpdates", api_base_url=api_base_url)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
 
@@ -600,12 +618,12 @@ def main() -> int:
         payload: dict[str, object] = {"url": args.set_webhook, "allowed_updates": ["message", "callback_query"]}
         if secret:
             payload["secret_token"] = secret
-        result = telegram_request(token, "setWebhook", payload)
+        result = telegram_request(token, "setWebhook", payload, api_base_url=api_base_url)
         print(json.dumps({"ok": result.get("ok", False), "description": result.get("description")}, ensure_ascii=False))
         return 0
 
     if args.delete_webhook:
-        result = telegram_request(token, "deleteWebhook", {"drop_pending_updates": False})
+        result = telegram_request(token, "deleteWebhook", {"drop_pending_updates": False}, api_base_url=api_base_url)
         print(json.dumps({"ok": result.get("ok", False), "description": result.get("description")}, ensure_ascii=False))
         return 0
 
@@ -665,20 +683,27 @@ def main() -> int:
         print("--text is required", file=sys.stderr)
         return 2
 
-    result = send_text_messages(token, str(chat_id), text, reply_markup=reply_markup, parse_mode=args.parse_mode)
+    result = send_text_messages(
+        token,
+        str(chat_id),
+        text,
+        reply_markup=reply_markup,
+        parse_mode=args.parse_mode,
+        api_base_url=api_base_url,
+    )
     if args.stage == "article_ready":
         html = run_dir / "roadmap-article.html"
         if html.exists():
             telegram_multipart_request(token, "sendDocument", {
                 "chat_id": str(chat_id),
                 "caption": f"HTML-версия статьи-roadmap: {args.audio}",
-            }, "document", html, display_filename=article_document_filename(args.audio, ".html"))
+            }, "document", html, display_filename=article_document_filename(args.audio, ".html"), api_base_url=api_base_url)
         pdf = run_dir / "roadmap-article.pdf"
         if pdf.exists():
             telegram_multipart_request(token, "sendDocument", {
                 "chat_id": str(chat_id),
                 "caption": f"PDF-версия статьи-roadmap: {args.audio}",
-            }, "document", pdf, display_filename=article_document_filename(args.audio, ".pdf"))
+            }, "document", pdf, display_filename=article_document_filename(args.audio, ".pdf"), api_base_url=api_base_url)
     print(json.dumps({"ok": result.get("ok", False), "message_id": result.get("result", {}).get("message_id")}, ensure_ascii=False))
     return 0
 

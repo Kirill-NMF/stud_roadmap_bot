@@ -1,0 +1,18 @@
+[Unit]
+Description=Telegram Local Bot API Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/zoom-audio-pipeline/pipeline.env
+ExecStart=/usr/bin/telegram-bot-api --api-id=${TELEGRAM_LOCAL_API_ID} --api-hash=${TELEGRAM_LOCAL_API_HASH} --local --http-ip-address=127.0.0.1 --http-port=${TELEGRAM_LOCAL_API_PORT} --dir=${LOCAL_BOT_API_ROOT}
+Restart=always
+RestartSec=3
+User=root
+WorkingDirectory=/var/lib/telegram-bot-api
+StandardOutput=append:/var/log/zoom-audio-pipeline/telegram-bot-api-local.log
+StandardError=append:/var/log/zoom-audio-pipeline/telegram-bot-api-local.log
+
+[Install]
+WantedBy=multi-user.target

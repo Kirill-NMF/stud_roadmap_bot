@@ -29,7 +29,9 @@ DEFAULT_TELEGRAM_INTAKE_DIR = "/var/lib/zoom-audio-pipeline/telegram-intake"
 DEFAULT_TELEGRAM_NOTION_INTAKE_STATE = "/var/lib/zoom-audio-pipeline/telegram-notion-intake.json"
 DEFAULT_INBOX_DIR = "/var/lib/zoom-audio-pipeline/inbox"
 DEFAULT_NOTION_ARCHIVE_WORKER = "/usr/local/bin/telegram-notion-archive-worker"
-DEFAULT_TELEGRAM_MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024
+DEFAULT_TELEGRAM_API_BASE_URL = "https://api.telegram.org"
+DEFAULT_TELEGRAM_CLOUD_MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024
+DEFAULT_LOCAL_BOT_API_ROOT = "/var/lib/telegram-bot-api"
 NOTION_UPLOAD_VERSION = "2026-03-11"
 
 
@@ -46,11 +48,9 @@ def format_mb(size_bytes: int) -> str:
 
 def telegram_file_too_large_message(file_size: int, max_bytes: int) -> str:
     return (
-        "Файл вижу, но он больше текущего лимита скачивания бота: "
+        "Файл вижу, но он больше лимита облачного Telegram Bot API: "
         f"размер {format_mb(file_size)}, лимит {format_mb(max_bytes)}.\n\n"
-        "Что можно сделать сейчас: отправь файл через Notion, сожми аудио до лимита "
-        "или разбей запись на части. Если хочешь регулярно отправлять очень большие "
-        "файлы прямо в Telegram, нужно отдельно подключать Telegram-клиент для intake."
+        "Для таких файлов нужен Local Bot API Server или Notion."
     )
 
 
@@ -100,8 +100,51 @@ def append_event(path: Path, event: dict[str, Any]) -> None:
         handle.write(json.dumps(event, ensure_ascii=False) + "\n")
 
 
-def telegram_request(token: str, method: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
-    url = f"https://api.telegram.org/bot{token}/{method}"
+def telegram_api_base_url(value: str | None = None) -> str:
+    return (value or DEFAULT_TELEGRAM_API_BASE_URL).rstrip("/")
+
+
+def is_cloud_telegram_api(api_base_url: str) -> bool:
+    return telegram_api_base_url(api_base_url) == DEFAULT_TELEGRAM_API_BASE_URL
+
+
+def telegram_method_url(token: str, method: str, api_base_url: str | None = None) -> str:
+    return f"{telegram_api_base_url(api_base_url)}/bot{token}/{method}"
+
+
+def telegram_file_url(token: str, file_path: str, api_base_url: str | None = None) -> str:
+    return f"{telegram_api_base_url(api_base_url)}/file/bot{token}/{file_path.lstrip('/')}"
+
+
+def copy_local_bot_api_file(file_path: str, destination: Path, allowed_root: Path) -> bool:
+    source = Path(file_path)
+    if not source.is_absolute():
+        return False
+    resolved_source = source.resolve(strict=True)
+    resolved_root = allowed_root.resolve(strict=True)
+    if resolved_source != resolved_root and resolved_root not in resolved_source.parents:
+        raise RuntimeError("Local Bot API returned a file outside the allowed root")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    tmp = destination.with_suffix(destination.suffix + ".partial")
+    tmp.unlink(missing_ok=True)
+    with resolved_source.open("rb") as src, tmp.open("wb") as dst:
+        while True:
+            chunk = src.read(1024 * 1024)
+            if not chunk:
+                break
+            dst.write(chunk)
+    tmp.replace(destination)
+    return True
+
+
+def telegram_request(
+    token: str,
+    method: str,
+    payload: dict[str, Any] | None = None,
+    *,
+    api_base_url: str | None = None,
+) -> dict[str, Any]:
+    url = telegram_method_url(token, method, api_base_url)
     data = None
     headers = {}
     if payload is not None:
@@ -112,9 +155,15 @@ def telegram_request(token: str, method: str, payload: dict[str, Any] | None = N
         return json.loads(response.read().decode("utf-8"))
 
 
-def safe_telegram_request(token: str, method: str, payload: dict[str, Any]) -> None:
+def safe_telegram_request(
+    token: str,
+    method: str,
+    payload: dict[str, Any],
+    *,
+    api_base_url: str | None = None,
+) -> None:
     try:
-        telegram_request(token, method, payload)
+        telegram_request(token, method, payload, api_base_url=api_base_url)
     except Exception as error:
         print(f"telegram_request_error method={method}: {error!r}", flush=True)
 
@@ -160,8 +209,11 @@ def download_telegram_file(
     destination: Path,
     *,
     max_bytes: int | None = None,
+    api_base_url: str | None = None,
+    local_bot_api_root: Path | None = None,
 ) -> None:
-    info = telegram_request(token, "getFile", {"file_id": file_id})
+    base_url = telegram_api_base_url(api_base_url)
+    info = telegram_request(token, "getFile", {"file_id": file_id}, api_base_url=base_url)
     result = info.get("result", {})
     file_path = result.get("file_path")
     if not file_path:
@@ -169,7 +221,12 @@ def download_telegram_file(
     file_size = result.get("file_size")
     if max_bytes and isinstance(file_size, int) and file_size > max_bytes:
         raise TelegramFileTooLargeError(file_size, max_bytes)
-    url = f"https://api.telegram.org/file/bot{token}/{file_path}"
+
+    if not is_cloud_telegram_api(base_url) and local_bot_api_root:
+        if copy_local_bot_api_file(str(file_path), destination, local_bot_api_root):
+            return
+
+    url = telegram_file_url(token, str(file_path), base_url)
     destination.parent.mkdir(parents=True, exist_ok=True)
     request = urllib.request.Request(url, method="GET")
     with urllib.request.urlopen(request, timeout=60) as response:
@@ -410,9 +467,12 @@ def accept_audio_message_for_pipeline(config: dict[str, str], token: str, messag
     audio = extract_audio_message(message)
     if not audio or not audio.get("file_id"):
         raise RuntimeError("No Telegram audio file found")
-    max_bytes = int(config.get("telegram_max_download_bytes", str(DEFAULT_TELEGRAM_MAX_DOWNLOAD_BYTES)))
+    api_base_url = telegram_api_base_url(config.get("telegram_api_base_url"))
+    max_bytes = None
+    if is_cloud_telegram_api(api_base_url):
+        max_bytes = int(config.get("telegram_cloud_max_download_bytes", str(DEFAULT_TELEGRAM_CLOUD_MAX_DOWNLOAD_BYTES)))
     file_size = audio.get("file_size")
-    if isinstance(file_size, int) and file_size > max_bytes:
+    if max_bytes and isinstance(file_size, int) and file_size > max_bytes:
         raise TelegramFileTooLargeError(file_size, max_bytes)
 
     state_path = Path(config.get("telegram_notion_intake_state", DEFAULT_TELEGRAM_NOTION_INTAKE_STATE))
@@ -424,7 +484,14 @@ def accept_audio_message_for_pipeline(config: dict[str, str], token: str, messag
 
     filename = safe_filename(str(audio.get("file_name") or "telegram-audio.m4a"))
     local_path = unique_intake_path(Path(config.get("telegram_intake_dir", DEFAULT_TELEGRAM_INTAKE_DIR)), filename)
-    download_telegram_file(token, str(audio["file_id"]), local_path, max_bytes=max_bytes)
+    download_telegram_file(
+        token,
+        str(audio["file_id"]),
+        local_path,
+        max_bytes=max_bytes,
+        api_base_url=api_base_url,
+        local_bot_api_root=Path(config.get("local_bot_api_root", DEFAULT_LOCAL_BOT_API_ROOT)),
+    )
     intake_id = telegram_intake_id(audio, local_path)
     if intake_id in files:
         local_path.unlink(missing_ok=True)
@@ -624,7 +691,18 @@ def correction_text_from_message(config: dict[str, str], token: str, run_dir: Pa
         return "", ""
 
     voice_path = run_dir / "telegram-voice-notes" / f"{safe_stamp()}-{file_id[:10]}{extension}"
-    download_telegram_file(token, file_id, voice_path)
+    api_base_url = telegram_api_base_url(config.get("telegram_api_base_url"))
+    max_bytes = None
+    if is_cloud_telegram_api(api_base_url):
+        max_bytes = int(config.get("telegram_cloud_max_download_bytes", str(DEFAULT_TELEGRAM_CLOUD_MAX_DOWNLOAD_BYTES)))
+    download_telegram_file(
+        token,
+        file_id,
+        voice_path,
+        max_bytes=max_bytes,
+        api_base_url=api_base_url,
+        local_bot_api_root=Path(config.get("local_bot_api_root", DEFAULT_LOCAL_BOT_API_ROOT)),
+    )
     try:
         transcript = transcribe_voice(config, voice_path)
     except Exception as error:
@@ -639,6 +717,7 @@ def make_handler(config: dict[str, str]):
     secret = config["secret"]
     registry_file = Path(config["registry_file"])
     events_file = Path(config["events_file"])
+    api_base_url = telegram_api_base_url(config.get("telegram_api_base_url"))
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "RoadmapTelegramWebhook/1.1"
@@ -693,13 +772,18 @@ def make_handler(config: dict[str, str]):
             chat_id = message.get("chat", {}).get("id") or callback.get("from", {}).get("id")
             if not item:
                 if callback_id:
-                    safe_telegram_request(token, "answerCallbackQuery", {"callback_query_id": callback_id, "text": "Run не найден"})
+                    safe_telegram_request(
+                        token,
+                        "answerCallbackQuery",
+                        {"callback_query_id": callback_id, "text": "Run не найден"},
+                        api_base_url=api_base_url,
+                    )
                 if chat_id:
                     safe_telegram_request(token, "sendMessage", {
                         "chat_id": chat_id,
                         "text": "Не нашёл этот запуск. Открой свежую проверку и нажми «Согласен» там.",
                         "disable_web_page_preview": True,
-                    })
+                    }, api_base_url=api_base_url)
                 return
 
             run_dir = Path(item["run_dir"])
@@ -711,7 +795,12 @@ def make_handler(config: dict[str, str]):
             decision, reply = decision_map.get(action, ("unknown", "Неизвестное действие"))
             if action != "approve":
                 if callback_id:
-                    safe_telegram_request(token, "answerCallbackQuery", {"callback_query_id": callback_id, "text": reply})
+                    safe_telegram_request(
+                        token,
+                        "answerCallbackQuery",
+                        {"callback_query_id": callback_id, "text": reply},
+                        api_base_url=api_base_url,
+                    )
                 return
             reply = mark_approved_and_start(run_dir, audio, chat_id, key, status_path, events_file)
 
@@ -719,13 +808,18 @@ def make_handler(config: dict[str, str]):
             save_json(registry_file, registry)
 
             if callback_id:
-                safe_telegram_request(token, "answerCallbackQuery", {"callback_query_id": callback_id, "text": reply})
+                safe_telegram_request(
+                    token,
+                    "answerCallbackQuery",
+                    {"callback_query_id": callback_id, "text": reply},
+                    api_base_url=api_base_url,
+                )
             if chat_id:
                 safe_telegram_request(token, "sendMessage", {
                     "chat_id": chat_id,
                     "text": "\n".join([reply, f"Файл: {audio}"]),
                     "disable_web_page_preview": True,
-                })
+                }, api_base_url=api_base_url)
 
         def handle_message(self, message: dict[str, Any]) -> None:
             chat_id = message.get("chat", {}).get("id")
@@ -738,9 +832,14 @@ def make_handler(config: dict[str, str]):
                 audio = extract_audio_message(message)
                 if not audio:
                     return
-                max_bytes = int(config.get("telegram_max_download_bytes", str(DEFAULT_TELEGRAM_MAX_DOWNLOAD_BYTES)))
+                max_bytes = None
+                if is_cloud_telegram_api(api_base_url):
+                    max_bytes = int(config.get(
+                        "telegram_cloud_max_download_bytes",
+                        str(DEFAULT_TELEGRAM_CLOUD_MAX_DOWNLOAD_BYTES),
+                    ))
                 file_size = audio.get("file_size")
-                if isinstance(file_size, int) and file_size > max_bytes:
+                if max_bytes and isinstance(file_size, int) and file_size > max_bytes:
                     append_event(events_file, {
                         "stage": "telegram_intake_rejected",
                         "chat_id": str(chat_id),
@@ -752,13 +851,13 @@ def make_handler(config: dict[str, str]):
                         "chat_id": chat_id,
                         "text": telegram_file_too_large_message(file_size, max_bytes),
                         "disable_web_page_preview": True,
-                    })
+                    }, api_base_url=api_base_url)
                     return
                 safe_telegram_request(token, "sendMessage", {
                     "chat_id": chat_id,
                     "text": "Аудио получил. Запускаю pipeline, а файл отдельно архивирую в Notion.",
                     "disable_web_page_preview": True,
-                })
+                }, api_base_url=api_base_url)
                 try:
                     result = accept_audio_message_for_pipeline(config, token, message)
                 except TelegramFileTooLargeError as error:
@@ -773,7 +872,7 @@ def make_handler(config: dict[str, str]):
                         "chat_id": chat_id,
                         "text": telegram_file_too_large_message(error.file_size, error.max_bytes),
                         "disable_web_page_preview": True,
-                    })
+                    }, api_base_url=api_base_url)
                     return
                 except Exception as error:
                     append_event(events_file, {
@@ -788,7 +887,7 @@ def make_handler(config: dict[str, str]):
                             "Файл не запущен, нужно проверить серверную ошибку."
                         ),
                         "disable_web_page_preview": True,
-                    })
+                    }, api_base_url=api_base_url)
                     return
                 append_event(events_file, {
                     "stage": "telegram_intake_accepted",
@@ -809,7 +908,7 @@ def make_handler(config: dict[str, str]):
                     "chat_id": chat_id,
                     "text": "\n".join([text, f"Файл: {result.get('file_name', 'audio')}"]),
                     "disable_web_page_preview": True,
-                })
+                }, api_base_url=api_base_url)
                 return
 
             run_dir = Path(pending["run_dir"])
@@ -824,14 +923,14 @@ def make_handler(config: dict[str, str]):
                         f"Файл: {audio}",
                     ]),
                     "disable_web_page_preview": True,
-                })
+                }, api_base_url=api_base_url)
             text, source = correction_text_from_message(config, token, run_dir, message)
             if not text:
                 safe_telegram_request(token, "sendMessage", {
                     "chat_id": chat_id,
                     "text": "Я жду текстовую или голосовую правку по текущему анализу.",
                     "disable_web_page_preview": True,
-                })
+                }, api_base_url=api_base_url)
                 return
             if text.startswith("/") and source == "text":
                 return
@@ -846,7 +945,7 @@ def make_handler(config: dict[str, str]):
                     "chat_id": chat_id,
                     "text": "\n".join([reply, f"Файл: {audio}"]),
                     "disable_web_page_preview": True,
-                })
+                }, api_base_url=api_base_url)
                 return
 
             notes_path = append_teacher_note(run_dir, source, text)
@@ -879,7 +978,7 @@ def make_handler(config: dict[str, str]):
                     text[:2500],
                 ]),
                 "disable_web_page_preview": True,
-            })
+            }, api_base_url=api_base_url)
 
     return Handler
 
@@ -896,7 +995,9 @@ def main() -> int:
     parser.add_argument("--telegram-notion-intake-state", default=DEFAULT_TELEGRAM_NOTION_INTAKE_STATE)
     parser.add_argument("--inbox-dir", default=DEFAULT_INBOX_DIR)
     parser.add_argument("--notion-archive-worker", default=DEFAULT_NOTION_ARCHIVE_WORKER)
-    parser.add_argument("--telegram-max-download-mb", type=int, default=50)
+    parser.add_argument("--telegram-api-base-url", default=DEFAULT_TELEGRAM_API_BASE_URL)
+    parser.add_argument("--telegram-cloud-max-download-mb", type=int, default=20)
+    parser.add_argument("--local-bot-api-root", default=DEFAULT_LOCAL_BOT_API_ROOT)
     args = parser.parse_args()
 
     env = {**load_env(Path(args.notion_env_file)), **load_env(Path(args.env_file)), **os.environ}
@@ -919,7 +1020,11 @@ def main() -> int:
         "telegram_notion_intake_state": args.telegram_notion_intake_state,
         "inbox_dir": args.inbox_dir,
         "notion_archive_worker": args.notion_archive_worker,
-        "telegram_max_download_bytes": str(args.telegram_max_download_mb * 1024 * 1024),
+        "telegram_api_base_url": env.get("TELEGRAM_API_BASE_URL", args.telegram_api_base_url),
+        "telegram_cloud_max_download_bytes": str(
+            int(env.get("TELEGRAM_CLOUD_MAX_DOWNLOAD_MB", str(args.telegram_cloud_max_download_mb))) * 1024 * 1024
+        ),
+        "local_bot_api_root": env.get("LOCAL_BOT_API_ROOT", args.local_bot_api_root),
     })
     server = HTTPServer((args.host, args.port), handler)
     print(f"telegram roadmap webhook listening on {args.host}:{args.port}", flush=True)

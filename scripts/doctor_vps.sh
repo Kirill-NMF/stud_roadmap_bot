@@ -29,6 +29,18 @@ require_env_key() {
   grep -Eq "^(export[[:space:]]+)?${key}=.+" "$ENV_FILE"
 }
 
+env_value() {
+  local key="$1"
+  local line value
+  line="$(grep -E "^(export[[:space:]]+)?${key}=.+" "$ENV_FILE" | tail -n 1 || true)"
+  value="${line#*=}"
+  value="${value%\"}"
+  value="${value#\"}"
+  value="${value%\'}"
+  value="${value#\'}"
+  printf '%s' "$value"
+}
+
 check "env file exists" require_file "$ENV_FILE"
 check "python3" require_command python3
 check "ffmpeg" require_command ffmpeg
@@ -74,6 +86,14 @@ fi
 check "telegram-roadmap-webhook unit" systemctl cat telegram-roadmap-webhook.service
 check "notion-webhook-receiver unit" systemctl cat notion-webhook-receiver.service
 check "notion-pipeline-poll timer unit" systemctl cat notion-pipeline-poll.timer
+
+if [[ -s "$ENV_FILE" ]] && [[ "$(env_value TELEGRAM_API_BASE_URL)" == http://127.0.0.1:* ]]; then
+  check "env TELEGRAM_LOCAL_API_ID configured" require_env_key TELEGRAM_LOCAL_API_ID
+  check "env TELEGRAM_LOCAL_API_HASH configured" require_env_key TELEGRAM_LOCAL_API_HASH
+  check "env LOCAL_BOT_API_ROOT configured" require_env_key LOCAL_BOT_API_ROOT
+  check "telegram-bot-api binary" require_command telegram-bot-api
+  check "telegram-bot-api-local unit" systemctl cat telegram-bot-api-local.service
+fi
 
 if [[ "$FAILED" -eq 0 ]]; then
   echo "doctor ok"

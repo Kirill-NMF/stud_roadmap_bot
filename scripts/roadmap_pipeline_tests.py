@@ -109,21 +109,22 @@ class TempRunMixin:
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
-    def handler(self):
-        Handler = WEBHOOK.make_handler(
-            {
-                "token": "token",
-                "secret": "secret",
-                "registry_file": str(self.registry),
-                "events_file": str(self.events),
-                "voice_python": "python3",
-                "voice_transcriber": "noop",
-                "telegram_intake_dir": str(self.root / "telegram-intake"),
-                "telegram_notion_intake_state": str(self.root / "telegram-notion-intake.json"),
-                "inbox_dir": str(self.root / "inbox"),
-                "notion_archive_worker": "",
-            }
-        )
+    def handler(self, extra_config: dict[str, str] | None = None):
+        config = {
+            "token": "token",
+            "secret": "secret",
+            "registry_file": str(self.registry),
+            "events_file": str(self.events),
+            "voice_python": "python3",
+            "voice_transcriber": "noop",
+            "telegram_intake_dir": str(self.root / "telegram-intake"),
+            "telegram_notion_intake_state": str(self.root / "telegram-notion-intake.json"),
+            "inbox_dir": str(self.root / "inbox"),
+            "notion_archive_worker": "",
+        }
+        if extra_config:
+            config.update(extra_config)
+        Handler = WEBHOOK.make_handler(config)
         return object.__new__(Handler)
 
     def status(self) -> dict[str, object]:
@@ -269,7 +270,12 @@ class OpenRouterRoadmapGeneratorTests(unittest.TestCase):
             )
             sent: list[dict[str, object]] = []
 
-            def fake_telegram_request(_token: str, method: str, payload: dict[str, object] | None = None):
+            def fake_telegram_request(
+                _token: str,
+                method: str,
+                payload: dict[str, object] | None = None,
+                **_kwargs: object,
+            ):
                 if method == "sendMessage" and payload:
                     sent.append(payload)
                 return {"ok": True, "result": {"message_id": 101}}
@@ -603,7 +609,7 @@ class WebhookApprovalTests(TempRunMixin, unittest.TestCase):
         self.safe_patch = patch.object(
             WEBHOOK,
             "safe_telegram_request",
-            side_effect=lambda _token, method, payload: self.sent.append((method, payload)),
+            side_effect=lambda _token, method, payload, **_kwargs: self.sent.append((method, payload)),
         )
         self.run_patch = patch.object(WEBHOOK.subprocess, "run")
         self.start_patch = patch.object(WEBHOOK, "start_pipeline_async")
@@ -794,7 +800,30 @@ class WebhookApprovalTests(TempRunMixin, unittest.TestCase):
         sent_texts = [payload["text"] for method, payload in self.sent if method == "sendMessage"]
         self.assertTrue(any("Не смог принять аудио в pipeline" in text for text in sent_texts))
 
-    def test_telegram_audio_slightly_above_20mb_uses_default_intake_limit(self) -> None:
+    def test_cloud_telegram_audio_above_20mb_is_rejected_before_download(self) -> None:
+        self.registry.write_text(json.dumps({"runs": {}, "pending_reviews": {}}, ensure_ascii=False), encoding="utf-8")
+        message = {
+            "chat": {"id": 42},
+            "document": {
+                "file_id": "file-id",
+                "file_unique_id": "unique-id",
+                "file_name": "zoom-call.m4a",
+                "mime_type": "audio/mp4",
+                "file_size": 21 * 1024 * 1024,
+            },
+        }
+
+        with patch.object(WEBHOOK, "accept_audio_message_for_pipeline") as accept_mock, \
+            patch.object(WEBHOOK, "start_notion_archive_worker_async") as worker_mock:
+            self.handler().handle_message(message)
+
+        accept_mock.assert_not_called()
+        self.start_mock.assert_not_called()
+        worker_mock.assert_not_called()
+        sent_texts = [payload["text"] for method, payload in self.sent if method == "sendMessage"]
+        self.assertTrue(any("Telegram Bot API" in text for text in sent_texts))
+
+    def test_local_bot_api_audio_above_20mb_is_accepted(self) -> None:
         self.registry.write_text(json.dumps({"runs": {}, "pending_reviews": {}}, ensure_ascii=False), encoding="utf-8")
         result = {
             "status": "accepted",
@@ -816,7 +845,7 @@ class WebhookApprovalTests(TempRunMixin, unittest.TestCase):
 
         with patch.object(WEBHOOK, "accept_audio_message_for_pipeline", return_value=result) as accept_mock, \
             patch.object(WEBHOOK, "start_notion_archive_worker_async") as worker_mock:
-            self.handler().handle_message(message)
+            self.handler({"telegram_api_base_url": "http://127.0.0.1:8081"}).handle_message(message)
 
         accept_mock.assert_called_once()
         self.start_mock.assert_called_once()
@@ -846,7 +875,7 @@ class WebhookApprovalTests(TempRunMixin, unittest.TestCase):
         self.assertIn("telegram_intake_rejected", events)
         self.assertIn("file_too_large", events)
         sent_texts = [payload["text"] for method, payload in self.sent if method == "sendMessage"]
-        self.assertTrue(any("текущего лимита скачивания бота" in text and "лимит" in text for text in sent_texts))
+        self.assertTrue(any("Telegram Bot API" in text and "лимит" in text for text in sent_texts))
         self.assertFalse(any("Аудио получил" in text for text in sent_texts))
 
     def test_pending_audio_remains_teacher_correction_not_notion_intake(self) -> None:
@@ -860,6 +889,58 @@ class WebhookApprovalTests(TempRunMixin, unittest.TestCase):
 
 
 class TelegramNotionIntakeTests(unittest.TestCase):
+    def test_telegram_urls_can_target_local_bot_api(self) -> None:
+        self.assertEqual(
+            WEBHOOK.telegram_method_url("token", "getFile", "http://127.0.0.1:8081/"),
+            "http://127.0.0.1:8081/bottoken/getFile",
+        )
+        self.assertEqual(
+            WEBHOOK.telegram_file_url("token", "audio/file.m4a", "http://127.0.0.1:8081/"),
+            "http://127.0.0.1:8081/file/bottoken/audio/file.m4a",
+        )
+        self.assertFalse(WEBHOOK.is_cloud_telegram_api("http://127.0.0.1:8081"))
+
+    def test_download_telegram_file_copies_local_bot_api_absolute_file_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            api_root = root / "telegram-bot-api"
+            source = api_root / "token" / "documents" / "lesson.m4a"
+            destination = root / "intake" / "lesson.m4a"
+            source.parent.mkdir(parents=True)
+            source.write_bytes(b"audio")
+
+            def fake_telegram_request(
+                _token: str,
+                method: str,
+                payload: dict[str, object] | None = None,
+                **kwargs: object,
+            ) -> dict[str, object]:
+                self.assertEqual(method, "getFile")
+                self.assertEqual(payload, {"file_id": "file-id"})
+                self.assertEqual(kwargs.get("api_base_url"), "http://127.0.0.1:8081")
+                return {"ok": True, "result": {"file_path": str(source), "file_size": 51 * 1024 * 1024}}
+
+            with patch.object(WEBHOOK, "telegram_request", side_effect=fake_telegram_request):
+                WEBHOOK.download_telegram_file(
+                    "token",
+                    "file-id",
+                    destination,
+                    api_base_url="http://127.0.0.1:8081",
+                    local_bot_api_root=api_root,
+                )
+
+            self.assertEqual(destination.read_bytes(), b"audio")
+
+    def test_local_bot_api_file_copy_rejects_paths_outside_allowed_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            api_root = root / "telegram-bot-api"
+            api_root.mkdir()
+            outside = root / "outside.m4a"
+            outside.write_bytes(b"audio")
+            with self.assertRaises(RuntimeError):
+                WEBHOOK.copy_local_bot_api_file(str(outside), root / "copy.m4a", api_root)
+
     def test_load_env_supports_export_lines_used_by_notion_env(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             env_path = Path(tmp) / "notion.env"
@@ -915,7 +996,7 @@ class TelegramNotionIntakeTests(unittest.TestCase):
                     "telegram_notion_intake_state": str(state_path),
                     "telegram_intake_dir": str(root / "intake"),
                     "inbox_dir": str(root / "inbox"),
-                    "telegram_max_download_bytes": "20971520",
+                    "telegram_cloud_max_download_bytes": "20971520",
                     "notion_api_key": "unused",
                     "notion_target": "https://notion.so/3b635d73584c80368c5bcfeb579c16d8",
                 },
@@ -940,7 +1021,7 @@ class TelegramNotionIntakeTests(unittest.TestCase):
                     {
                         "telegram_notion_intake_state": str(Path(tmp) / "state.json"),
                         "telegram_intake_dir": str(Path(tmp) / "intake"),
-                        "telegram_max_download_bytes": "10",
+                        "telegram_cloud_max_download_bytes": "10",
                         "notion_api_key": "unused",
                         "notion_target": "https://notion.so/3b635d73584c80368c5bcfeb579c16d8",
                     },
@@ -1185,7 +1266,12 @@ class NotifyFormattingTests(unittest.TestCase):
     def test_verification_keyboard_only_open_and_approve(self) -> None:
         sent: list[dict[str, object]] = []
 
-        def fake_telegram_request(_token: str, method: str, payload: dict[str, object] | None = None):
+        def fake_telegram_request(
+            _token: str,
+            method: str,
+            payload: dict[str, object] | None = None,
+            **_kwargs: object,
+        ):
             if method == "sendMessage" and payload:
                 sent.append(payload)
             return {"ok": True, "result": {"message_id": 101}}
@@ -1218,7 +1304,12 @@ class NotifyFormattingTests(unittest.TestCase):
         sent_texts: list[dict[str, object]] = []
         sent_docs: list[tuple[Path, str | None]] = []
 
-        def fake_telegram_request(_token: str, method: str, payload: dict[str, object] | None = None):
+        def fake_telegram_request(
+            _token: str,
+            method: str,
+            payload: dict[str, object] | None = None,
+            **_kwargs: object,
+        ):
             if method == "sendMessage" and payload:
                 sent_texts.append(payload)
             return {"ok": True, "result": {"message_id": 202}}
@@ -1230,6 +1321,7 @@ class NotifyFormattingTests(unittest.TestCase):
             file_field: str,
             file_path: Path,
             display_filename: str | None = None,
+            **_kwargs: object,
         ):
             self.assertEqual(method, "sendDocument")
             self.assertEqual(file_field, "document")
