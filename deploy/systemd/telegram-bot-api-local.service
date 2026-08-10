@@ -6,7 +6,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 EnvironmentFile=/etc/zoom-audio-pipeline/pipeline.env
-ExecStart=/usr/local/bin/telegram-bot-api --api-id=${TELEGRAM_LOCAL_API_ID} --api-hash=${TELEGRAM_LOCAL_API_HASH} --local --http-ip-address=127.0.0.1 --http-port=${TELEGRAM_LOCAL_API_PORT} --dir=${LOCAL_BOT_API_ROOT}
+ExecStart=/usr/local/bin/telegram-bot-api --local --http-ip-address=127.0.0.1 --http-port=${TELEGRAM_LOCAL_API_PORT} --dir=${LOCAL_BOT_API_ROOT}
 Restart=always
 RestartSec=3
 User=root

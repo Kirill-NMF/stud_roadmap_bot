@@ -291,6 +291,8 @@ class OpenRouterRoadmapGeneratorTests(unittest.TestCase):
             self.assertEqual(merged["TELEGRAM_API_BASE_URL"], "http://127.0.0.1:8081")
             self.assertEqual(merged["TELEGRAM_LOCAL_API_ID"], "123")
             self.assertEqual(merged["TELEGRAM_LOCAL_API_HASH"], "hash-secret")
+            self.assertEqual(merged["TELEGRAM_API_ID"], "123")
+            self.assertEqual(merged["TELEGRAM_API_HASH"], "hash-secret")
             self.assertEqual(merged["ROADMAP_PUBLIC_ROOT"], "/custom/public")
 
     def test_service_templates_use_single_pipeline_env_file(self) -> None:
@@ -304,6 +306,7 @@ class OpenRouterRoadmapGeneratorTests(unittest.TestCase):
         self.assertIn("--webhook-env-file /etc/zoom-audio-pipeline/notion-webhook.env", notion_service)
         self.assertIn("EnvironmentFile=/etc/zoom-audio-pipeline/pipeline.env", local_bot_api_service)
         self.assertIn("ExecStart=/usr/local/bin/telegram-bot-api", local_bot_api_service)
+        self.assertNotIn("--api-hash", local_bot_api_service)
         self.assertIn("telegram-bot-api-local.service", installer)
 
     def test_notify_can_take_public_base_url_from_env_file(self) -> None:

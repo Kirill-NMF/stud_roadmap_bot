@@ -81,6 +81,8 @@ def main() -> int:
         "LOCAL_BOT_API_ROOT": "/var/lib/telegram-bot-api",
         "TELEGRAM_LOCAL_API_ID": sources.get("SHORTTALK_REAL_TG_API_ID", current.get("TELEGRAM_LOCAL_API_ID", "")),
         "TELEGRAM_LOCAL_API_HASH": sources.get("SHORTTALK_REAL_TG_API_HASH", current.get("TELEGRAM_LOCAL_API_HASH", "")),
+        "TELEGRAM_API_ID": sources.get("SHORTTALK_REAL_TG_API_ID", current.get("TELEGRAM_API_ID", "")),
+        "TELEGRAM_API_HASH": sources.get("SHORTTALK_REAL_TG_API_HASH", current.get("TELEGRAM_API_HASH", "")),
         "TELEGRAM_LOCAL_API_PORT": "8081",
     }
     missing = [key for key, value in updates.items() if not value]
