@@ -70,6 +70,40 @@ def append_event(path: Path, event: dict[str, Any]) -> None:
         handle.write(json.dumps(event, ensure_ascii=False) + "\n")
 
 
+def parse_utc_ts(value: str) -> float:
+    if not value:
+        return 0.0
+    try:
+        return time.mktime(time.strptime(value.replace("Z", ""), "%Y-%m-%dT%H:%M:%S"))
+    except Exception:
+        return 0.0
+
+
+def mark_transcription_error(
+    *,
+    status_path: Path,
+    status: dict[str, Any],
+    processed: dict[str, Any],
+    key: str,
+    state: dict[str, Any],
+    state_path: Path,
+    events_path: Path,
+    audio_path: Path,
+    run_dir: Path,
+    error: Exception,
+) -> None:
+    finished_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    status.update({"status": "error", "error": repr(error), "finished_at": finished_at})
+    status_path.write_text(json.dumps(status, ensure_ascii=False, indent=2), encoding="utf-8")
+    processed[key].update({
+        "status": "error",
+        "error": repr(error),
+        "finished_at": finished_at,
+    })
+    save_state(state_path, state)
+    append_event(events_path, {"stage": "transcription_error", "audio": audio_path.name, "run_dir": str(run_dir), "error": repr(error)})
+
+
 def intake_sidecar_path(audio_path: Path) -> Path:
     return audio_path.with_name(audio_path.name + ".telegram-intake.json")
 
@@ -578,6 +612,11 @@ def main() -> int:
         choices=["local", "none"],
         default=os.environ.get("OPENROUTER_STT_FALLBACK", "local"),
     )
+    parser.add_argument(
+        "--transcribing-stale-after-sec",
+        type=int,
+        default=int(os.environ.get("TRANSCRIPTION_STALE_AFTER_SEC", "3600")),
+    )
     parser.add_argument("--verification-script", default="")
     parser.add_argument("--notify-script", default="")
     parser.add_argument("--force", action="store_true")
@@ -605,16 +644,43 @@ def main() -> int:
             transcript_path = Path(run_dir_value) / "transcript.md" if run_dir_value else None
             if transcript_path and transcript_path.exists():
                 run_verification(args.verification_script, Path(run_dir_value), audio_path.name, events_path)
+                continue
             elif entry.get("status") == "transcribing":
-                append_event(
-                    events_path,
-                    {
-                        "stage": "transcription_in_progress_skipped",
-                        "audio": audio_path.name,
-                        "run_dir": run_dir_value,
-                    },
-                )
-            continue
+                started_at = parse_utc_ts(str(entry.get("started_at") or ""))
+                age_seconds = time.time() - started_at if started_at else 0
+                if args.transcribing_stale_after_sec > 0 and started_at and age_seconds >= args.transcribing_stale_after_sec:
+                    stale_run_dir = Path(run_dir_value) if run_dir_value else None
+                    if stale_run_dir and (stale_run_dir / "status.json").exists():
+                        stale_status = load_state(stale_run_dir / "status.json")
+                        stale_status.update({
+                            "status": "error",
+                            "error": f"stale transcribing after {int(age_seconds)} seconds without transcript",
+                            "finished_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                        })
+                        (stale_run_dir / "status.json").write_text(json.dumps(stale_status, ensure_ascii=False, indent=2), encoding="utf-8")
+                    append_event(
+                        events_path,
+                        {
+                            "stage": "transcription_stale_recovered",
+                            "audio": audio_path.name,
+                            "run_dir": run_dir_value,
+                            "age_seconds": int(age_seconds),
+                        },
+                    )
+                    processed.pop(key, None)
+                    save_state(state_path, state)
+                else:
+                    append_event(
+                        events_path,
+                        {
+                            "stage": "transcription_in_progress_skipped",
+                            "audio": audio_path.name,
+                            "run_dir": run_dir_value,
+                        },
+                    )
+                    continue
+            else:
+                continue
 
         run_dir = runs_dir / f"{time.strftime('%Y%m%d-%H%M%S', time.gmtime())}-{safe_slug(audio_path.name)}-{key[:8]}"
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -681,36 +747,54 @@ def main() -> int:
                     },
                 )
                 print(f"transcription_provider_fallback: {audio_path.name} openrouter -> local", file=sys.stderr)
-                metadata = transcribe_audio(
-                    audio_path,
-                    run_dir,
-                    provider="local",
-                    model_name=args.model,
-                    device=args.device,
-                    compute_type=args.compute_type,
-                    language=args.language or None,
-                    beam_size=args.beam_size,
-                    openrouter_model=args.openrouter_model,
-                    openrouter_api_key_env=args.openrouter_api_key_env,
-                    openrouter_api_key_file=args.openrouter_api_key_file,
-                    openrouter_endpoint=args.openrouter_endpoint,
-                    openrouter_timeout=args.openrouter_timeout,
-                    openrouter_retries=args.openrouter_retries,
-                    openrouter_retry_delay=args.openrouter_retry_delay,
-                    openrouter_compress_threshold_mb=args.openrouter_compress_threshold_mb,
-                    openrouter_ffmpeg=args.openrouter_ffmpeg,
-                    openrouter_ffmpeg_timeout=args.openrouter_ffmpeg_timeout,
-                )
+                try:
+                    metadata = transcribe_audio(
+                        audio_path,
+                        run_dir,
+                        provider="local",
+                        model_name=args.model,
+                        device=args.device,
+                        compute_type=args.compute_type,
+                        language=args.language or None,
+                        beam_size=args.beam_size,
+                        openrouter_model=args.openrouter_model,
+                        openrouter_api_key_env=args.openrouter_api_key_env,
+                        openrouter_api_key_file=args.openrouter_api_key_file,
+                        openrouter_endpoint=args.openrouter_endpoint,
+                        openrouter_timeout=args.openrouter_timeout,
+                        openrouter_retries=args.openrouter_retries,
+                        openrouter_retry_delay=args.openrouter_retry_delay,
+                        openrouter_compress_threshold_mb=args.openrouter_compress_threshold_mb,
+                        openrouter_ffmpeg=args.openrouter_ffmpeg,
+                        openrouter_ffmpeg_timeout=args.openrouter_ffmpeg_timeout,
+                    )
+                except Exception as fallback_error:
+                    mark_transcription_error(
+                        status_path=status_path,
+                        status=status,
+                        processed=processed,
+                        key=key,
+                        state=state,
+                        state_path=state_path,
+                        events_path=events_path,
+                        audio_path=audio_path,
+                        run_dir=run_dir,
+                        error=fallback_error,
+                    )
+                    raise
             else:
-                status.update({"status": "error", "error": repr(error), "finished_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
-                status_path.write_text(json.dumps(status, ensure_ascii=False, indent=2), encoding="utf-8")
-                processed[key].update({
-                    "status": "error",
-                    "error": repr(error),
-                    "finished_at": status["finished_at"],
-                })
-                save_state(state_path, state)
-                append_event(events_path, {"stage": "transcription_error", "audio": audio_path.name, "run_dir": str(run_dir), "error": repr(error)})
+                mark_transcription_error(
+                    status_path=status_path,
+                    status=status,
+                    processed=processed,
+                    key=key,
+                    state=state,
+                    state_path=state_path,
+                    events_path=events_path,
+                    audio_path=audio_path,
+                    run_dir=run_dir,
+                    error=error,
+                )
                 raise
 
         status.update({

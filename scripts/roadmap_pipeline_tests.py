@@ -703,6 +703,123 @@ class ProcessNewAudioIntakeNotifyTests(unittest.TestCase):
         self.assertEqual(args[:6], ["--stage", "verification_ready", "--audio", "lesson.m4a", "--run-dir", str(run_dir)])
         self.assertEqual(args[-2:], ["--chat-id", "1607901073"])
 
+    def test_openrouter_fallback_failure_marks_status_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            inbox = root / "inbox"
+            runs = root / "runs"
+            inbox.mkdir()
+            runs.mkdir()
+            audio = inbox / "lesson.m4a"
+            audio.write_bytes(b"audio")
+            state = root / "state.json"
+            events = root / "events.jsonl"
+
+            def fake_transcribe(_audio, _run_dir, *, provider, **_kwargs):
+                if provider == "openrouter":
+                    raise PROCESS_AUDIO.OpenRouterTranscriptionError("HTTP 502", status_code=502, retriable=True)
+                raise ModuleNotFoundError("No module named 'faster_whisper'")
+
+            with patch.object(sys, "argv", [
+                "process_new_audio.py",
+                "--inbox-dir",
+                str(inbox),
+                "--runs-dir",
+                str(runs),
+                "--state-file",
+                str(state),
+                "--events-file",
+                str(events),
+                "--transcription-provider",
+                "openrouter",
+            ]), patch.object(PROCESS_AUDIO, "transcribe_audio", side_effect=fake_transcribe):
+                with self.assertRaises(ModuleNotFoundError):
+                    PROCESS_AUDIO.main()
+
+            run_dirs = list(runs.iterdir())
+            self.assertEqual(len(run_dirs), 1)
+            status = json.loads((run_dirs[0] / "status.json").read_text(encoding="utf-8"))
+            processed = json.loads(state.read_text(encoding="utf-8"))["processed"]
+            entry = next(iter(processed.values()))
+            self.assertEqual(status["status"], "error")
+            self.assertEqual(entry["status"], "error")
+            self.assertIn("faster_whisper", status["error"])
+            event_text = events.read_text(encoding="utf-8")
+            self.assertIn("transcription_provider_fallback", event_text)
+            self.assertIn("transcription_error", event_text)
+
+    def test_stale_transcribing_entry_is_recovered_and_retried(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            inbox = root / "inbox"
+            runs = root / "runs"
+            old_run = runs / "old-run"
+            inbox.mkdir()
+            old_run.mkdir(parents=True)
+            audio = inbox / "lesson.m4a"
+            audio.write_bytes(b"audio")
+            key = PROCESS_AUDIO.file_key(audio)
+            old_started = "2000-01-01T00:00:00Z"
+            state = root / "state.json"
+            events = root / "events.jsonl"
+            state.write_text(
+                json.dumps(
+                    {
+                        "processed": {
+                            key: {
+                                "status": "transcribing",
+                                "audio_path": str(audio),
+                                "audio_name": audio.name,
+                                "run_dir": str(old_run),
+                                "started_at": old_started,
+                            }
+                        }
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            (old_run / "status.json").write_text(
+                json.dumps({"status": "transcribing", "started_at": old_started}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            def fake_transcribe(_audio, run_dir, *, provider, **_kwargs):
+                return PROCESS_AUDIO.write_transcript_artifacts(
+                    audio,
+                    run_dir,
+                    plain_lines=["ok"],
+                    timed_lines=["[00:00 - 00:01] ok"],
+                    markdown_lines=["# Transcript", "", "ok"],
+                    metadata={"provider": provider},
+                )
+
+            with patch.object(sys, "argv", [
+                "process_new_audio.py",
+                "--inbox-dir",
+                str(inbox),
+                "--runs-dir",
+                str(runs),
+                "--state-file",
+                str(state),
+                "--events-file",
+                str(events),
+                "--transcribing-stale-after-sec",
+                "1",
+            ]), patch.object(PROCESS_AUDIO, "transcribe_audio", side_effect=fake_transcribe):
+                self.assertEqual(PROCESS_AUDIO.main(), 0)
+
+            old_status = json.loads((old_run / "status.json").read_text(encoding="utf-8"))
+            processed = json.loads(state.read_text(encoding="utf-8"))["processed"]
+            entry = processed[key]
+            self.assertEqual(old_status["status"], "error")
+            self.assertEqual(entry["status"], "transcribed")
+            self.assertNotEqual(entry["run_dir"], str(old_run))
+            self.assertTrue(Path(entry["transcript"]).exists())
+            event_text = events.read_text(encoding="utf-8")
+            self.assertIn("transcription_stale_recovered", event_text)
+            self.assertIn("transcription_done", event_text)
+
 
 class WebhookApprovalTests(TempRunMixin, unittest.TestCase):
     def setUp(self) -> None:
