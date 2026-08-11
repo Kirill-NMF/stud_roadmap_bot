@@ -34,6 +34,8 @@ DEFAULT_TELEGRAM_API_BASE_URL = "https://api.telegram.org"
 DEFAULT_TELEGRAM_CLOUD_MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024
 DEFAULT_LOCAL_BOT_API_ROOT = "/var/lib/telegram-bot-api"
 NOTION_UPLOAD_VERSION = "2026-03-11"
+NOTION_SINGLE_PART_MAX_BYTES = 20 * 1024 * 1024
+NOTION_MULTI_PART_CHUNK_BYTES = 10 * 1024 * 1024
 
 
 class TelegramFileTooLargeError(RuntimeError):
@@ -274,15 +276,28 @@ def notion_json_request(api_key: str, method: str, path: str, payload: dict[str,
         raise RuntimeError(f"Notion API error {error.code}: {body[:500]}") from error
 
 
-def notion_multipart_file_request(api_key: str, file_upload_id: str, file_path: Path, content_type: str) -> dict[str, Any]:
-    boundary = "----CodexRoadmapNotionBoundary" + hashlib.sha1(str(file_path).encode("utf-8")).hexdigest()
+def notion_send_file_part_request(
+    api_key: str,
+    file_upload_id: str,
+    filename: str,
+    content_type: str,
+    file_bytes: bytes,
+    part_number: int | None = None,
+) -> dict[str, Any]:
+    boundary_seed = f"{file_upload_id}:{filename}:{part_number or 0}:{len(file_bytes)}"
+    boundary = "----CodexRoadmapNotionBoundary" + hashlib.sha1(boundary_seed.encode("utf-8")).hexdigest()
     body = bytearray()
+    if part_number is not None:
+        body.extend(f"--{boundary}\r\n".encode("utf-8"))
+        body.extend(b'Content-Disposition: form-data; name="part_number"\r\n\r\n')
+        body.extend(str(part_number).encode("utf-8"))
+        body.extend(b"\r\n")
     body.extend(f"--{boundary}\r\n".encode("utf-8"))
     body.extend(
-        f'Content-Disposition: form-data; name="file"; filename="{file_path.name}"\r\n'.encode("utf-8")
+        f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'.encode("utf-8")
     )
     body.extend(f"Content-Type: {content_type}\r\n\r\n".encode("utf-8"))
-    body.extend(file_path.read_bytes())
+    body.extend(file_bytes)
     body.extend(f"\r\n--{boundary}--\r\n".encode("utf-8"))
     request = urllib.request.Request(
         f"https://api.notion.com/v1/file_uploads/{file_upload_id}/send",
@@ -300,6 +315,63 @@ def notion_multipart_file_request(api_key: str, file_upload_id: str, file_path: 
     except urllib.error.HTTPError as error:
         body = error.read().decode("utf-8", "replace")
         raise RuntimeError(f"Notion file upload error {error.code}: {body[:500]}") from error
+
+
+def notion_multipart_file_request(api_key: str, file_upload_id: str, file_path: Path, content_type: str) -> dict[str, Any]:
+    return notion_send_file_part_request(api_key, file_upload_id, file_path.name, content_type, file_path.read_bytes())
+
+
+def notion_upload_file_request(api_key: str, file_path: Path, content_type: str) -> dict[str, Any]:
+    file_size = file_path.stat().st_size
+    if file_size <= NOTION_SINGLE_PART_MAX_BYTES:
+        upload = notion_json_request(
+            api_key,
+            "POST",
+            "/file_uploads",
+            {"mode": "single_part", "filename": file_path.name, "content_type": content_type},
+        )
+        file_upload_id = upload.get("id")
+        if not file_upload_id:
+            raise RuntimeError("Notion did not return file_upload id")
+        sent = notion_multipart_file_request(api_key, str(file_upload_id), file_path, content_type)
+        if sent.get("status") != "uploaded":
+            raise RuntimeError(f"Notion upload did not finish: {sent.get('status')}")
+        return sent
+
+    number_of_parts = (file_size + NOTION_MULTI_PART_CHUNK_BYTES - 1) // NOTION_MULTI_PART_CHUNK_BYTES
+    upload = notion_json_request(
+        api_key,
+        "POST",
+        "/file_uploads",
+        {
+            "mode": "multi_part",
+            "filename": file_path.name,
+            "content_type": content_type,
+            "number_of_parts": number_of_parts,
+        },
+    )
+    file_upload_id = upload.get("id")
+    if not file_upload_id:
+        raise RuntimeError("Notion did not return file_upload id")
+    with file_path.open("rb") as handle:
+        for part_number in range(1, number_of_parts + 1):
+            chunk = handle.read(NOTION_MULTI_PART_CHUNK_BYTES)
+            if not chunk:
+                raise RuntimeError(f"Notion multipart upload missing part {part_number}")
+            sent = notion_send_file_part_request(
+                api_key,
+                str(file_upload_id),
+                file_path.name,
+                content_type,
+                chunk,
+                part_number=part_number,
+            )
+            if sent.get("status") not in {"pending", "uploaded"}:
+                raise RuntimeError(f"Notion multipart part {part_number} did not finish: {sent.get('status')}")
+    completed = notion_json_request(api_key, "POST", f"/file_uploads/{file_upload_id}/complete", {})
+    if completed.get("status") != "uploaded":
+        raise RuntimeError(f"Notion multipart upload did not complete: {completed.get('status')}")
+    return completed
 
 
 def notion_upload_content_type(file_path: Path, declared_mime_type: str = "") -> str:
@@ -527,18 +599,10 @@ def upload_registry_entry_to_notion(config: dict[str, str], entry: dict[str, Any
         raise RuntimeError("NOTION_API_KEY and NOTION_TARGET are required for Telegram intake")
 
     content_type = notion_upload_content_type(local_path, str(entry.get("mime_type") or ""))
-    upload = notion_json_request(
-        notion_api_key,
-        "POST",
-        "/file_uploads",
-        {"mode": "single_part", "filename": local_path.name, "content_type": content_type},
-    )
+    upload = notion_upload_file_request(notion_api_key, local_path, content_type)
     file_upload_id = upload.get("id")
     if not file_upload_id:
         raise RuntimeError("Notion did not return file_upload id")
-    sent = notion_multipart_file_request(notion_api_key, str(file_upload_id), local_path, content_type)
-    if sent.get("status") != "uploaded":
-        raise RuntimeError(f"Notion upload did not finish: {sent.get('status')}")
 
     root_page_id = page_id_from_target(notion_target)
     page = notion_json_request(notion_api_key, "POST", "/pages", notion_child_page_payload(root_page_id, local_path.name))

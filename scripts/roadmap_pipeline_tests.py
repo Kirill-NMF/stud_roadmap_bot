@@ -1097,6 +1097,75 @@ class TelegramNotionIntakeTests(unittest.TestCase):
         self.assertEqual(WEBHOOK.notion_upload_content_type(Path("Настя а2.m4a"), "audio/x-m4a"), "audio/mp4")
         self.assertEqual(WEBHOOK.notion_upload_content_type(Path("call.mp3"), "audio/mp3"), "audio/mpeg")
 
+    def test_notion_small_upload_uses_single_part(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            audio = Path(tmp) / "small.m4a"
+            audio.write_bytes(b"audio")
+            requests: list[tuple[str, dict[str, object] | None]] = []
+
+            def fake_json(_key, method, path, payload=None):
+                requests.append((path, payload))
+                self.assertEqual(method, "POST")
+                return {"id": "file-upload-id", "status": "uploaded"}
+
+            with patch.object(WEBHOOK, "notion_json_request", side_effect=fake_json), patch.object(
+                WEBHOOK,
+                "notion_multipart_file_request",
+                return_value={"id": "file-upload-id", "status": "uploaded"},
+            ) as send_mock:
+                result = WEBHOOK.notion_upload_file_request("key", audio, "audio/mp4")
+
+        self.assertEqual(result["id"], "file-upload-id")
+        self.assertEqual(
+            requests,
+            [("/file_uploads", {"mode": "single_part", "filename": "small.m4a", "content_type": "audio/mp4"})],
+        )
+        send_mock.assert_called_once()
+
+    def test_notion_large_upload_uses_multi_part_and_complete(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            audio = Path(tmp) / "large.m4a"
+            audio.write_bytes(b"x" * (WEBHOOK.NOTION_SINGLE_PART_MAX_BYTES + 1))
+            requests: list[tuple[str, dict[str, object] | None]] = []
+            sent_parts: list[tuple[int | None, int]] = []
+
+            def fake_json(_key, method, path, payload=None):
+                requests.append((path, payload))
+                self.assertEqual(method, "POST")
+                if path == "/file_uploads":
+                    return {"id": "file-upload-id", "status": "pending"}
+                if path == "/file_uploads/file-upload-id/complete":
+                    return {"id": "file-upload-id", "status": "uploaded"}
+                raise AssertionError(path)
+
+            def fake_send(_key, _file_upload_id, _filename, _content_type, file_bytes, part_number=None):
+                sent_parts.append((part_number, len(file_bytes)))
+                return {"id": "file-upload-id", "status": "pending"}
+
+            with patch.object(WEBHOOK, "notion_json_request", side_effect=fake_json), patch.object(
+                WEBHOOK,
+                "notion_send_file_part_request",
+                side_effect=fake_send,
+            ):
+                result = WEBHOOK.notion_upload_file_request("key", audio, "audio/mp4")
+
+        self.assertEqual(result["status"], "uploaded")
+        self.assertEqual(
+            requests[0],
+            (
+                "/file_uploads",
+                {
+                    "mode": "multi_part",
+                    "filename": "large.m4a",
+                    "content_type": "audio/mp4",
+                    "number_of_parts": 3,
+                },
+            ),
+        )
+        self.assertEqual(requests[-1], ("/file_uploads/file-upload-id/complete", {}))
+        self.assertEqual([part for part, _size in sent_parts], [1, 2, 3])
+        self.assertEqual(sum(size for _part, size in sent_parts), WEBHOOK.NOTION_SINGLE_PART_MAX_BYTES + 1)
+
     def test_accept_audio_message_is_idempotent_by_telegram_unique_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
