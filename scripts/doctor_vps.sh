@@ -95,6 +95,10 @@ if [[ -s "$ENV_FILE" ]] && [[ "$(env_value TELEGRAM_API_BASE_URL)" == http://127
   check "telegram-bot-api-local unit" systemctl cat telegram-bot-api-local.service
 fi
 
+if [[ -s "$ENV_FILE" ]] && [[ "$(env_value OPENROUTER_STT_FALLBACK)" == "local" ]]; then
+  check "local stt faster_whisper import" "$(env_value PIPELINE_PYTHON)" -c "import faster_whisper"
+fi
+
 if [[ "$FAILED" -eq 0 ]]; then
   echo "doctor ok"
 else

@@ -254,6 +254,12 @@ class OpenRouterRoadmapGeneratorTests(unittest.TestCase):
         self.assertIn('notion-pull-audio --env-file "$ENV_FILE"', runner)
         self.assertIn("VERIFICATION_SCRIPT:-/usr/local/bin/generate-verification-with-openrouter", runner)
         self.assertIn("ARTICLE_DRAFT_SCRIPT:-/usr/local/bin/generate-article-with-openrouter", runner)
+        self.assertIn('LOCAL_STT_MODEL="${LOCAL_STT_MODEL:-tiny}"', runner)
+        self.assertIn('--model "$LOCAL_STT_MODEL"', runner)
+        self.assertIn('--device "$LOCAL_STT_DEVICE"', runner)
+        self.assertIn('--compute-type "$LOCAL_STT_COMPUTE_TYPE"', runner)
+        self.assertIn('--language "$LOCAL_STT_LANGUAGE"', runner)
+        self.assertIn('--transcribing-stale-after-sec "$TRANSCRIPTION_STALE_AFTER_SEC"', runner)
         self.assertIn('process-approved-roadmaps --article-script "$ARTICLE_SCRIPT"', runner)
         self.assertNotIn("/root/codex-audio/nastya-a2/.venv/bin/python", runner)
 

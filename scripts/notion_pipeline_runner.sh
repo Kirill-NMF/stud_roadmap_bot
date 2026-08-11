@@ -23,6 +23,11 @@ OPENROUTER_STT_RETRIES="${OPENROUTER_STT_RETRIES:-3}"
 OPENROUTER_STT_RETRY_DELAY="${OPENROUTER_STT_RETRY_DELAY:-3}"
 OPENROUTER_STT_COMPRESS_THRESHOLD_MB="${OPENROUTER_STT_COMPRESS_THRESHOLD_MB:-20}"
 OPENROUTER_STT_FALLBACK="${OPENROUTER_STT_FALLBACK:-local}"
+LOCAL_STT_MODEL="${LOCAL_STT_MODEL:-tiny}"
+LOCAL_STT_DEVICE="${LOCAL_STT_DEVICE:-cpu}"
+LOCAL_STT_COMPUTE_TYPE="${LOCAL_STT_COMPUTE_TYPE:-int8}"
+LOCAL_STT_LANGUAGE="${LOCAL_STT_LANGUAGE:-ru}"
+TRANSCRIPTION_STALE_AFTER_SEC="${TRANSCRIPTION_STALE_AFTER_SEC:-900}"
 VERIFICATION_SCRIPT="${VERIFICATION_SCRIPT:-/usr/local/bin/generate-verification-with-openrouter}"
 ARTICLE_SCRIPT="${ARTICLE_SCRIPT:-/usr/local/bin/generate-article-with-gemini-rewrite}"
 ARTICLE_DRAFT_SCRIPT="${ARTICLE_DRAFT_SCRIPT:-/usr/local/bin/generate-article-with-openrouter}"
@@ -49,6 +54,11 @@ fi
     --openrouter-retry-delay "$OPENROUTER_STT_RETRY_DELAY" \
     --openrouter-compress-threshold-mb "$OPENROUTER_STT_COMPRESS_THRESHOLD_MB" \
     --openrouter-fallback "$OPENROUTER_STT_FALLBACK" \
+    --model "$LOCAL_STT_MODEL" \
+    --device "$LOCAL_STT_DEVICE" \
+    --compute-type "$LOCAL_STT_COMPUTE_TYPE" \
+    --language "$LOCAL_STT_LANGUAGE" \
+    --transcribing-stale-after-sec "$TRANSCRIPTION_STALE_AFTER_SEC" \
     --verification-script "$VERIFICATION_SCRIPT" \
     --notify-script /usr/local/bin/telegram-roadmap-notify
   echo "$(date -Is) process-new-audio done"
