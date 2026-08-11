@@ -36,6 +36,7 @@ DEFAULT_LOCAL_BOT_API_ROOT = "/var/lib/telegram-bot-api"
 NOTION_UPLOAD_VERSION = "2026-03-11"
 NOTION_SINGLE_PART_MAX_BYTES = 20 * 1024 * 1024
 NOTION_MULTI_PART_CHUNK_BYTES = 10 * 1024 * 1024
+PROCESSED_TELEGRAM_MESSAGES_LIMIT = 500
 
 
 class TelegramFileTooLargeError(RuntimeError):
@@ -502,6 +503,36 @@ def registry_entry_blocks_pipeline(entry: dict[str, Any]) -> bool:
     return str(entry.get("pipeline_status", "")) in {"pipeline_started", "pipeline_done", "pipeline_failed"}
 
 
+def telegram_message_key(message: dict[str, Any]) -> str:
+    chat_id = message.get("chat", {}).get("id")
+    message_id = message.get("message_id")
+    if chat_id is None or message_id is None:
+        return ""
+    return f"{chat_id}:{message_id}"
+
+
+def telegram_message_already_processed(registry: dict[str, Any], message: dict[str, Any]) -> bool:
+    key = telegram_message_key(message)
+    if not key:
+        return False
+    processed = registry.get("processed_messages", {})
+    return isinstance(processed, dict) and key in processed
+
+
+def mark_telegram_message_processed(registry: dict[str, Any], message: dict[str, Any]) -> None:
+    key = telegram_message_key(message)
+    if not key:
+        return
+    processed = registry.setdefault("processed_messages", {})
+    if not isinstance(processed, dict):
+        processed = {}
+        registry["processed_messages"] = processed
+    processed[key] = utc_now()
+    if len(processed) > PROCESSED_TELEGRAM_MESSAGES_LIMIT:
+        for old_key in sorted(processed, key=lambda item: str(processed[item]))[: len(processed) - PROCESSED_TELEGRAM_MESSAGES_LIMIT]:
+            processed.pop(old_key, None)
+
+
 def extract_audio_message(message: dict[str, Any]) -> dict[str, Any] | None:
     if message.get("audio"):
         audio = message["audio"]
@@ -883,9 +914,13 @@ def make_handler(config: dict[str, str]):
                 return
 
             registry = load_json(registry_file, {"runs": {}})
+            if telegram_message_already_processed(registry, message):
+                return
             pending = registry.get("pending_reviews", {}).get(str(chat_id))
             if not pending:
                 if message.get("voice"):
+                    mark_telegram_message_processed(registry, message)
+                    save_json(registry_file, registry)
                     append_event(events_file, {
                         "stage": "telegram_voice_without_pending_review",
                         "chat_id": str(chat_id),
@@ -902,6 +937,8 @@ def make_handler(config: dict[str, str]):
                 audio = extract_audio_message(message)
                 if not audio:
                     return
+                mark_telegram_message_processed(registry, message)
+                save_json(registry_file, registry)
                 max_bytes = None
                 if is_cloud_telegram_api(api_base_url):
                     max_bytes = int(config.get(
@@ -983,6 +1020,8 @@ def make_handler(config: dict[str, str]):
 
             run_dir = Path(pending["run_dir"])
             audio = pending.get("audio", run_dir.name)
+            mark_telegram_message_processed(registry, message)
+            save_json(registry_file, registry)
             if message.get("voice") or message.get("audio") or (
                 message.get("document") and str(message["document"].get("mime_type", "")).startswith("audio/")
             ):

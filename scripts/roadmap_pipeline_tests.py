@@ -927,6 +927,26 @@ class WebhookApprovalTests(TempRunMixin, unittest.TestCase):
         sent_texts = [payload["text"] for method, payload in self.sent if method == "sendMessage"]
         self.assertTrue(any("активной проверки" in text for text in sent_texts))
 
+    def test_repeated_voice_without_pending_is_silent(self) -> None:
+        self.registry.write_text(json.dumps({"runs": {}, "pending_reviews": {}}, ensure_ascii=False), encoding="utf-8")
+        message = {
+            "message_id": 1001,
+            "chat": {"id": 42},
+            "voice": {
+                "file_id": "voice-file",
+                "file_unique_id": "voice-unique",
+                "file_size": 123,
+            },
+        }
+
+        self.handler().handle_message(message)
+        self.handler().handle_message(message)
+
+        sent_messages = [payload for method, payload in self.sent if method == "sendMessage"]
+        self.assertEqual(len(sent_messages), 1)
+        events = [line for line in self.events.read_text(encoding="utf-8").splitlines() if "telegram_voice_without_pending_review" in line]
+        self.assertEqual(len(events), 1)
+
     def test_cloud_telegram_audio_above_20mb_is_rejected_before_download(self) -> None:
         self.registry.write_text(json.dumps({"runs": {}, "pending_reviews": {}}, ensure_ascii=False), encoding="utf-8")
         message = {
@@ -978,6 +998,39 @@ class WebhookApprovalTests(TempRunMixin, unittest.TestCase):
         self.start_mock.assert_called_once()
         worker_mock.assert_called_once()
 
+    def test_repeated_audio_upload_message_is_silent(self) -> None:
+        self.registry.write_text(json.dumps({"runs": {}, "pending_reviews": {}}, ensure_ascii=False), encoding="utf-8")
+        result = {
+            "status": "accepted",
+            "intake_id": "telegram:unique-id",
+            "file_name": "zoom-call.m4a",
+            "local_path": "/var/lib/zoom-audio-pipeline/telegram-intake/zoom-call.m4a",
+            "inbox_path": "/var/lib/zoom-audio-pipeline/inbox/zoom-call.m4a",
+        }
+        message = {
+            "message_id": 1002,
+            "chat": {"id": 42},
+            "document": {
+                "file_id": "file-id",
+                "file_unique_id": "unique-id",
+                "file_name": "zoom-call.m4a",
+                "mime_type": "audio/mp4",
+                "file_size": 123,
+            },
+        }
+
+        with patch.object(WEBHOOK, "accept_audio_message_for_pipeline", return_value=result) as accept_mock, \
+            patch.object(WEBHOOK, "start_notion_archive_worker_async") as worker_mock:
+            self.handler().handle_message(message)
+            self.handler().handle_message(message)
+
+        accept_mock.assert_called_once()
+        self.start_mock.assert_called_once()
+        worker_mock.assert_called_once()
+        sent_messages = [payload for method, payload in self.sent if method == "sendMessage"]
+        self.assertEqual(len(sent_messages), 2)
+        self.assertFalse(any("уже был принят" in payload["text"] for payload in sent_messages))
+
     def test_large_audio_without_pending_reports_limit_without_starting_pipeline(self) -> None:
         self.registry.write_text(json.dumps({"runs": {}, "pending_reviews": {}}, ensure_ascii=False), encoding="utf-8")
         message = {
@@ -1004,6 +1057,19 @@ class WebhookApprovalTests(TempRunMixin, unittest.TestCase):
         sent_texts = [payload["text"] for method, payload in self.sent if method == "sendMessage"]
         self.assertTrue(any("Telegram Bot API" in text and "лимит" in text for text in sent_texts))
         self.assertFalse(any("Аудио получил" in text for text in sent_texts))
+
+    def test_repeated_pending_voice_correction_does_not_fall_through_to_no_pending_message(self) -> None:
+        message = {"message_id": 1003, "chat": {"id": 42}, "voice": {"file_id": "voice-file"}}
+        with patch.object(WEBHOOK, "correction_text_from_message", return_value=("P1 РґРѕР±Р°РІРёС‚СЊ", "voice")), \
+            patch.object(WEBHOOK, "accept_audio_message_for_pipeline") as accept_mock:
+            self.handler().handle_message(message)
+            self.handler().handle_message(message)
+
+        accept_mock.assert_not_called()
+        self.start_mock.assert_called_once()
+        sent_texts = [payload["text"] for method, payload in self.sent if method == "sendMessage"]
+        self.assertEqual(len(sent_texts), 2)
+        self.assertFalse(any("нет активной проверки" in text for text in sent_texts))
 
     def test_pending_audio_remains_teacher_correction_not_notion_intake(self) -> None:
         with patch.object(WEBHOOK, "correction_text_from_message", return_value=("P1 добавить", "voice")), \
