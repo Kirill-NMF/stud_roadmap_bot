@@ -104,6 +104,19 @@ source: telegram
 
 Latest known local result: `68/68 OK`.
 
+Latest deployed recovery (2026-08-26):
+
+- Commits `7abe3ea` and `1cec79c` are deployed on the VPS.
+- Telegram voice corrections use OpenRouter Whisper Large v3 Turbo with a
+  local `small` fallback running from `PIPELINE_PYTHON`.
+- Article-provider failures no longer terminate the poller or block other
+  runs; retries use bounded exponential backoff and one Telegram notice.
+- Local and VPS suites both pass `68/68`; `roadmap-pipeline-doctor` passes.
+- The Dmitry recovery run remains safely retryable, but OpenRouter currently
+  returns HTTP 402 for both audio and article requests. The saved teacher note
+  and all run artifacts are retained; the pipeline will resume automatically
+  when provider credit is available.
+
 Latest VPS smoke:
 
 - `telegram-roadmap-webhook.service` active and `/roadmap-telegram/health` returns `{"ok": true}`.
