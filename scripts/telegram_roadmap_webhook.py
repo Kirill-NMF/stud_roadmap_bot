@@ -22,7 +22,7 @@ from typing import Any
 DEFAULT_ENV_FILE = "/root/.telegram/roadmap-bot.env"
 DEFAULT_REGISTRY_FILE = "/var/lib/zoom-audio-pipeline/telegram-run-registry.json"
 DEFAULT_EVENTS_FILE = "/var/log/zoom-audio-pipeline/events.jsonl"
-DEFAULT_VOICE_PYTHON = "/root/codex-audio/nastya-a2/.venv/bin/python"
+DEFAULT_VOICE_PYTHON = "python3"
 DEFAULT_VOICE_TRANSCRIBER = "/usr/local/bin/transcribe-telegram-voice"
 DEFAULT_VOICE_TRANSCRIBE_TIMEOUT = 900
 DEFAULT_VOICE_PROVIDER = "openrouter"
@@ -1150,7 +1150,7 @@ def main() -> int:
         "secret": secret,
         "registry_file": args.registry_file,
         "events_file": args.events_file,
-        "voice_python": env.get("TELEGRAM_VOICE_TRANSCRIBE_PYTHON", DEFAULT_VOICE_PYTHON),
+        "voice_python": env.get("TELEGRAM_VOICE_TRANSCRIBE_PYTHON", env.get("PIPELINE_PYTHON", DEFAULT_VOICE_PYTHON)),
         "voice_transcriber": env.get("TELEGRAM_VOICE_TRANSCRIBER", DEFAULT_VOICE_TRANSCRIBER),
         "voice_transcribe_timeout": env.get("TELEGRAM_VOICE_TRANSCRIBE_TIMEOUT", str(DEFAULT_VOICE_TRANSCRIBE_TIMEOUT)),
         "voice_provider": env.get("TELEGRAM_VOICE_TRANSCRIPTION_PROVIDER", env.get("TRANSCRIPTION_PROVIDER", DEFAULT_VOICE_PROVIDER)),

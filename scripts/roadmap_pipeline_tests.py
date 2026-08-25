@@ -152,6 +152,13 @@ class PromptRuleTests(unittest.TestCase):
 
 
 class TelegramVoiceTranscriptionTests(unittest.TestCase):
+    def test_webhook_voice_python_uses_standard_pipeline_runtime_fallback(self) -> None:
+        source = (ROOT / "scripts/telegram_roadmap_webhook.py").read_text(encoding="utf-8")
+        self.assertIn(
+            'env.get("TELEGRAM_VOICE_TRANSCRIBE_PYTHON", env.get("PIPELINE_PYTHON", DEFAULT_VOICE_PYTHON))',
+            source,
+        )
+
     def test_voice_transcriber_defaults_to_openrouter_without_local_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             audio = Path(tmp) / "voice.oga"
