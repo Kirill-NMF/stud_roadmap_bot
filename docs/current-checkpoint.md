@@ -1,6 +1,6 @@
 # Current Checkpoint
 
-Last updated: 2026-08-10
+Last updated: 2026-08-26
 
 ## Status
 
@@ -26,6 +26,17 @@ Telegram can now be used as the first intake step:
 6. A separate archive worker uploads the file to Notion as `root page -> child page named as the file -> marker paragraph -> audio block`.
 
 If the chat has a pending verification, audio/voice messages still mean teacher corrections for that verification, not new intake.
+
+Telegram voice corrections explicitly use OpenRouter
+`openai/whisper-large-v3-turbo`. If that provider is unavailable, the local
+fallback uses `small` rather than `tiny`. The selected provider and model are
+recorded in the run status and events log.
+
+Article failures are isolated per run. `process-approved-roadmaps` schedules an
+exponential retry (120 seconds up to 30 minutes), continues processing other
+runs, and sends one teacher-visible retry notice. A Gemini retry reuses the
+current article draft when it is newer than the teacher notes, so it does not
+repeat the expensive draft-generation stage.
 
 Telegram-origin Notion archive pages include a marker:
 
@@ -91,7 +102,7 @@ source: telegram
 & 'C:\Users\bests\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' scripts\roadmap_pipeline_tests.py
 ```
 
-Latest known local result: `36/36 OK`.
+Latest known local result: `67/67 OK`.
 
 Latest VPS smoke:
 

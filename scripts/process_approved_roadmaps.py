@@ -16,6 +16,8 @@ DEFAULT_RUNS_DIR = "/var/lib/zoom-audio-pipeline/runs"
 DEFAULT_EVENTS_FILE = "/var/log/zoom-audio-pipeline/events.jsonl"
 DEFAULT_ARTICLE_SCRIPT = "/usr/local/bin/generate-article-with-gemini-rewrite"
 DEFAULT_NOTIFY_SCRIPT = "/usr/local/bin/telegram-roadmap-notify"
+DEFAULT_RETRY_BASE_SECONDS = 120
+DEFAULT_RETRY_MAX_SECONDS = 1800
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -66,12 +68,68 @@ def notify_article_if_needed(
     save_json(status_path, status)
 
 
+def retry_delay_seconds(attempt: int, base_seconds: int, max_seconds: int) -> int:
+    exponent = min(max(0, attempt - 1), 32)
+    return min(max_seconds, base_seconds * (2 ** exponent))
+
+
+def retry_is_due(status: dict[str, Any], now: float | None = None) -> bool:
+    try:
+        next_retry = float(status.get("article_next_retry_at_epoch") or 0)
+    except (TypeError, ValueError):
+        return True
+    return next_retry <= (time.time() if now is None else now)
+
+
+def schedule_article_retry(
+    status_path: Path,
+    status: dict[str, Any],
+    *,
+    base_seconds: int,
+    max_seconds: int,
+) -> tuple[int, int]:
+    attempt = int(status.get("article_retry_attempt") or 0) + 1
+    delay = retry_delay_seconds(attempt, base_seconds, max_seconds)
+    now = time.time()
+    status["article_status"] = "failed"
+    status["article_retry_attempt"] = attempt
+    status["article_retry_pending"] = True
+    status["article_next_retry_at_epoch"] = now + delay
+    status["article_next_retry_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now + delay))
+    status["article_last_error_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))
+    save_json(status_path, status)
+    return attempt, delay
+
+
+def notify_article_retry_if_needed(
+    status_path: Path,
+    status: dict[str, Any],
+    notify_script: str,
+    audio_name: str,
+) -> None:
+    if status.get("article_retry_notified_at"):
+        return
+    message = (
+        "При создании финальных материалов возникла временная ошибка внешнего сервиса. "
+        "Файлы и правки сохранены, pipeline повторит этот этап автоматически.\n"
+        f"Файл: {audio_name}"
+    )
+    notify_args = ["--stage", "custom", "--text", message]
+    if status.get("telegram_chat_id"):
+        notify_args = ["--chat-id", str(status["telegram_chat_id"]), *notify_args]
+    notify(notify_script, notify_args)
+    status["article_retry_notified_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    save_json(status_path, status)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Process Telegram-approved roadmap runs.")
     parser.add_argument("--runs-dir", default=DEFAULT_RUNS_DIR)
     parser.add_argument("--events-file", default=DEFAULT_EVENTS_FILE)
     parser.add_argument("--article-script", default=DEFAULT_ARTICLE_SCRIPT)
     parser.add_argument("--notify-script", default=DEFAULT_NOTIFY_SCRIPT)
+    parser.add_argument("--retry-base-seconds", type=int, default=DEFAULT_RETRY_BASE_SECONDS)
+    parser.add_argument("--retry-max-seconds", type=int, default=DEFAULT_RETRY_MAX_SECONDS)
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
 
@@ -93,6 +151,9 @@ def main() -> int:
         if article_status == "done" and not args.force:
             notify_article_if_needed(status_path, status, args.notify_script, audio_name, run_dir)
             continue
+        if article_status == "failed" and not args.force and not retry_is_due(status):
+            print(f"article_retry_waiting: {audio_name} -> {status.get('article_next_retry_at', '')}")
+            continue
         if not (run_dir / "verification.md").exists():
             print(f"article_waiting_for_verification: {audio_name} -> {run_dir}")
             continue
@@ -102,10 +163,32 @@ def main() -> int:
         try:
             subprocess.run([args.article_script, str(run_dir)], check=True)
         except Exception as error:
-            append_event(events_path, {"stage": "article_error", "audio": audio_name, "run_dir": str(run_dir), "error": repr(error)})
-            raise
+            status = load_json(status_path)
+            attempt, delay = schedule_article_retry(
+                status_path,
+                status,
+                base_seconds=args.retry_base_seconds,
+                max_seconds=args.retry_max_seconds,
+            )
+            status = load_json(status_path)
+            append_event(events_path, {
+                "stage": "article_retry_scheduled",
+                "audio": audio_name,
+                "run_dir": str(run_dir),
+                "error": repr(error),
+                "attempt": attempt,
+                "retry_delay_seconds": delay,
+                "next_retry_at": status.get("article_next_retry_at"),
+            })
+            notify_article_retry_if_needed(status_path, status, args.notify_script, audio_name)
+            print(f"article_retry_scheduled: {audio_name} attempt={attempt} delay={delay}s")
+            continue
 
         status = load_json(status_path)
+        status["article_retry_pending"] = False
+        status.pop("article_next_retry_at_epoch", None)
+        status.pop("article_next_retry_at", None)
+        save_json(status_path, status)
         append_event(events_path, {
             "stage": "article_done",
             "audio": audio_name,

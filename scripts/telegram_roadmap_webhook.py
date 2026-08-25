@@ -25,6 +25,11 @@ DEFAULT_EVENTS_FILE = "/var/log/zoom-audio-pipeline/events.jsonl"
 DEFAULT_VOICE_PYTHON = "/root/codex-audio/nastya-a2/.venv/bin/python"
 DEFAULT_VOICE_TRANSCRIBER = "/usr/local/bin/transcribe-telegram-voice"
 DEFAULT_VOICE_TRANSCRIBE_TIMEOUT = 900
+DEFAULT_VOICE_PROVIDER = "openrouter"
+DEFAULT_VOICE_OPENROUTER_MODEL = "openai/whisper-large-v3-turbo"
+DEFAULT_VOICE_OPENROUTER_FALLBACK = "local"
+DEFAULT_VOICE_LOCAL_MODEL = "small"
+DEFAULT_VOICE_LANGUAGE = "ru"
 DEFAULT_NOTION_ENV_FILE = "/root/.notion/notion.env"
 DEFAULT_TELEGRAM_INTAKE_DIR = "/var/lib/zoom-audio-pipeline/telegram-intake"
 DEFAULT_TELEGRAM_NOTION_INTAKE_STATE = "/var/lib/zoom-audio-pipeline/telegram-notion-intake.json"
@@ -672,8 +677,23 @@ def transcribe_voice(config: dict[str, str], audio_path: Path) -> str:
     python = config.get("voice_python", DEFAULT_VOICE_PYTHON)
     script = config.get("voice_transcriber", DEFAULT_VOICE_TRANSCRIBER)
     timeout = int(config.get("voice_transcribe_timeout", str(DEFAULT_VOICE_TRANSCRIBE_TIMEOUT)))
+    command = [
+        python,
+        script,
+        str(audio_path),
+        "--provider",
+        config.get("voice_provider", DEFAULT_VOICE_PROVIDER),
+        "--openrouter-model",
+        config.get("voice_openrouter_model", DEFAULT_VOICE_OPENROUTER_MODEL),
+        "--openrouter-fallback",
+        config.get("voice_openrouter_fallback", DEFAULT_VOICE_OPENROUTER_FALLBACK),
+        "--model",
+        config.get("voice_local_model", DEFAULT_VOICE_LOCAL_MODEL),
+        "--language",
+        config.get("voice_language", DEFAULT_VOICE_LANGUAGE),
+    ]
     result = subprocess.run(
-        [python, script, str(audio_path)],
+        command,
         check=True,
         capture_output=True,
         text=True,
@@ -1066,17 +1086,27 @@ def make_handler(config: dict[str, str]):
             status["teacher_notes_updated_at"] = utc_now()
             status["teacher_verification_decision_at"] = utc_now()
             status["telegram_chat_id"] = str(chat_id)
+            if source == "voice":
+                status["teacher_voice_transcription_provider"] = config.get("voice_provider", DEFAULT_VOICE_PROVIDER)
+                status["teacher_voice_transcription_model"] = config.get(
+                    "voice_openrouter_model",
+                    DEFAULT_VOICE_OPENROUTER_MODEL,
+                )
             save_json(status_path, status)
 
             registry.get("pending_reviews", {}).pop(str(chat_id), None)
             save_json(registry_file, registry)
-            append_event(events_file, {
+            revision_event = {
                 "stage": "verification_revision_notes_received",
                 "audio": audio,
                 "run_dir": str(run_dir),
                 "teacher_notes": str(notes_path),
                 "source": source,
-            })
+            }
+            if source == "voice":
+                revision_event["transcription_provider"] = status["teacher_voice_transcription_provider"]
+                revision_event["transcription_model"] = status["teacher_voice_transcription_model"]
+            append_event(events_file, revision_event)
             start_pipeline_async()
             safe_telegram_request(token, "sendMessage", {
                 "chat_id": chat_id,
@@ -1123,6 +1153,11 @@ def main() -> int:
         "voice_python": env.get("TELEGRAM_VOICE_TRANSCRIBE_PYTHON", DEFAULT_VOICE_PYTHON),
         "voice_transcriber": env.get("TELEGRAM_VOICE_TRANSCRIBER", DEFAULT_VOICE_TRANSCRIBER),
         "voice_transcribe_timeout": env.get("TELEGRAM_VOICE_TRANSCRIBE_TIMEOUT", str(DEFAULT_VOICE_TRANSCRIBE_TIMEOUT)),
+        "voice_provider": env.get("TELEGRAM_VOICE_TRANSCRIPTION_PROVIDER", env.get("TRANSCRIPTION_PROVIDER", DEFAULT_VOICE_PROVIDER)),
+        "voice_openrouter_model": env.get("OPENROUTER_STT_MODEL", DEFAULT_VOICE_OPENROUTER_MODEL),
+        "voice_openrouter_fallback": env.get("OPENROUTER_STT_FALLBACK", DEFAULT_VOICE_OPENROUTER_FALLBACK),
+        "voice_local_model": env.get("TELEGRAM_VOICE_LOCAL_MODEL", DEFAULT_VOICE_LOCAL_MODEL),
+        "voice_language": env.get("LOCAL_STT_LANGUAGE", DEFAULT_VOICE_LANGUAGE),
         "notion_api_key": env.get("NOTION_API_KEY", ""),
         "notion_target": env.get("NOTION_TARGET", ""),
         "notion_env_file": args.notion_env_file,

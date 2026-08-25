@@ -152,17 +152,13 @@ class PromptRuleTests(unittest.TestCase):
 
 
 class TelegramVoiceTranscriptionTests(unittest.TestCase):
-    def test_voice_transcriber_uses_openrouter_provider_without_local_fallback(self) -> None:
+    def test_voice_transcriber_defaults_to_openrouter_without_local_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             audio = Path(tmp) / "voice.oga"
             audio.write_bytes(b"audio")
-            argv = [
-                "transcribe_telegram_voice.py",
-                str(audio),
-                "--provider",
-                "openrouter",
-            ]
-            with patch.object(sys, "argv", argv), \
+            argv = ["transcribe_telegram_voice.py", str(audio)]
+            with patch.dict(os.environ, {}, clear=True), \
+                patch.object(sys, "argv", argv), \
                 patch.object(VOICE_TRANSCRIBER, "transcribe_openrouter", return_value="teacher correction") as openrouter_mock, \
                 patch.object(VOICE_TRANSCRIBER, "transcribe_local") as local_mock, \
                 patch("sys.stdout", new_callable=io.StringIO) as stdout:
@@ -183,12 +179,35 @@ class TelegramVoiceTranscriptionTests(unittest.TestCase):
                         "voice_python": "python3",
                         "voice_transcriber": "transcribe-telegram-voice",
                         "voice_transcribe_timeout": "777",
+                        "voice_provider": "openrouter",
+                        "voice_openrouter_model": "openai/whisper-large-v3-turbo",
+                        "voice_openrouter_fallback": "local",
+                        "voice_local_model": "small",
+                        "voice_language": "ru",
                     },
                     audio,
                 )
 
         self.assertEqual(text, "ok")
         self.assertEqual(run_mock.call_args.kwargs["timeout"], 777)
+        self.assertEqual(
+            run_mock.call_args.args[0],
+            [
+                "python3",
+                "transcribe-telegram-voice",
+                str(audio),
+                "--provider",
+                "openrouter",
+                "--openrouter-model",
+                "openai/whisper-large-v3-turbo",
+                "--openrouter-fallback",
+                "local",
+                "--model",
+                "small",
+                "--language",
+                "ru",
+            ],
+        )
 
 
 class GeminiRewriteScriptTests(unittest.TestCase):
@@ -210,6 +229,17 @@ class GeminiRewriteScriptTests(unittest.TestCase):
         self.assertIn("heading mismatch", script)
         self.assertIn("unexpected P-codes added", script)
         self.assertIn("article_source\"] = \"gemini_rewrite\"", script)
+
+    def test_composite_script_reuses_current_draft_and_caps_rewrite_budget(self) -> None:
+        script = (ROOT / "scripts/generate_article_with_gemini_rewrite.sh").read_text(encoding="utf-8")
+        self.assertIn('NOTES="$RUN_DIR/teacher-notes.md"', script)
+        self.assertIn('[[ -s "$DRAFT"', script)
+        self.assertIn('"$DRAFT" -nt "$NOTES"', script)
+        self.assertIn("GEMINI_REWRITE_MAX_TOKENS", script)
+        self.assertIn('GEMINI_ARGS+=(--max-tokens "$GEMINI_MAX_TOKENS")', script)
+        self.assertIn('if value == "__DELETE__"', script)
+        self.assertIn('"article_done_at=__DELETE__"', script)
+        self.assertIn('data.pop("gemini_rewrite_failed_reason", None)', script)
 
     def test_processor_defaults_to_composite_gemini_script(self) -> None:
         self.assertEqual(APPROVED.DEFAULT_ARTICLE_SCRIPT, "/usr/local/bin/generate-article-with-gemini-rewrite")
@@ -244,6 +274,8 @@ class OpenRouterRoadmapGeneratorTests(unittest.TestCase):
         self.assertIn("--mode article", article)
         self.assertIn("openrouter-roadmap-generate", verification)
         self.assertIn("openrouter-roadmap-generate", article)
+        self.assertIn("OPENROUTER_ARTICLE_MAX_TOKENS", article)
+        self.assertIn('--max-tokens "$MAX_TOKENS"', article)
         self.assertNotIn("codex ", verification)
         self.assertNotIn("codex ", article)
 
@@ -1201,6 +1233,8 @@ class WebhookApprovalTests(TempRunMixin, unittest.TestCase):
 
         accept_mock.assert_not_called()
         self.assertEqual(self.status()["teacher_verification_decision"], "approved_for_article")
+        self.assertEqual(self.status()["teacher_voice_transcription_provider"], "openrouter")
+        self.assertEqual(self.status()["teacher_voice_transcription_model"], "openai/whisper-large-v3-turbo")
         self.start_mock.assert_called_once()
 
 
@@ -1746,6 +1780,10 @@ class NotifyFormattingTests(unittest.TestCase):
 
 
 class ApprovedProcessorTests(unittest.TestCase):
+    def test_corrupt_retry_state_is_due_and_backoff_is_bounded(self) -> None:
+        self.assertTrue(APPROVED.retry_is_due({"article_next_retry_at_epoch": "invalid"}, now=1_000.0))
+        self.assertEqual(APPROVED.retry_delay_seconds(1_000, 120, 1_800), 1_800)
+
     def test_done_article_notifies_once_with_chat_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp) / "run"
@@ -1767,6 +1805,86 @@ class ApprovedProcessorTests(unittest.TestCase):
             self.assertEqual(len(calls), 1)
             self.assertEqual(calls[0][:2], ["--chat-id", "42"])
             self.assertIn("article_notified_at", json.loads(status_path.read_text(encoding="utf-8")))
+
+    def test_failed_article_schedules_retry_notifies_once_and_continues(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = root / "first"
+            second = root / "second"
+            for run_dir in (first, second):
+                run_dir.mkdir()
+                (run_dir / "verification.md").write_text("verification", encoding="utf-8")
+                (run_dir / "status.json").write_text(
+                    json.dumps({
+                        "teacher_verification_decision": "approved_for_article",
+                        "article_status": "failed",
+                        "audio_path": str(run_dir / "audio.m4a"),
+                        "telegram_chat_id": "42",
+                    }),
+                    encoding="utf-8",
+                )
+
+            calls: list[str] = []
+            notifications: list[list[str]] = []
+
+            def fake_run(command: list[str], check: bool) -> None:
+                calls.append(command[-1])
+                if command[-1] == str(first):
+                    raise APPROVED.subprocess.CalledProcessError(1, command)
+                status_path = second / "status.json"
+                status = json.loads(status_path.read_text(encoding="utf-8"))
+                status["article_status"] = "done"
+                status_path.write_text(json.dumps(status), encoding="utf-8")
+
+            with patch.object(sys, "argv", [
+                "process_approved_roadmaps.py",
+                "--runs-dir",
+                str(root),
+                "--events-file",
+                str(root / "events.jsonl"),
+                "--retry-base-seconds",
+                "120",
+            ]), \
+                patch.object(APPROVED.subprocess, "run", side_effect=fake_run), \
+                patch.object(APPROVED, "notify", side_effect=lambda _script, args: notifications.append(args)), \
+                patch.object(APPROVED.time, "time", return_value=1_000.0):
+                self.assertEqual(APPROVED.main(), 0)
+
+            first_status = json.loads((first / "status.json").read_text(encoding="utf-8"))
+            self.assertEqual(calls, [str(first), str(second)])
+            self.assertEqual(first_status["article_retry_attempt"], 1)
+            self.assertEqual(first_status["article_next_retry_at_epoch"], 1_120.0)
+            self.assertIn("article_retry_notified_at", first_status)
+            self.assertEqual(len(notifications), 2)
+
+    def test_failed_article_waits_until_retry_is_due(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "run"
+            run_dir.mkdir()
+            (run_dir / "verification.md").write_text("verification", encoding="utf-8")
+            (run_dir / "status.json").write_text(
+                json.dumps({
+                    "teacher_verification_decision": "approved_for_article",
+                    "article_status": "failed",
+                    "audio_path": str(run_dir / "audio.m4a"),
+                    "article_next_retry_at_epoch": 2_000.0,
+                }),
+                encoding="utf-8",
+            )
+
+            with patch.object(sys, "argv", [
+                "process_approved_roadmaps.py",
+                "--runs-dir",
+                str(root),
+                "--events-file",
+                str(root / "events.jsonl"),
+            ]), \
+                patch.object(APPROVED.subprocess, "run") as run_mock, \
+                patch.object(APPROVED.time, "time", return_value=1_000.0):
+                self.assertEqual(APPROVED.main(), 0)
+
+            run_mock.assert_not_called()
 
 
 if __name__ == "__main__":

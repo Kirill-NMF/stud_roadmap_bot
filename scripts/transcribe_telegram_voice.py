@@ -19,6 +19,7 @@ from urllib import request
 DEFAULT_OPENROUTER_TRANSCRIPTIONS_URL = "https://openrouter.ai/api/v1/audio/transcriptions"
 DEFAULT_OPENROUTER_STT_MODEL = "openai/whisper-large-v3-turbo"
 DEFAULT_OPENROUTER_API_KEY_FILE = "~/.config/openrouter/api_key"
+DEFAULT_LOCAL_VOICE_MODEL = "small"
 RETRIABLE_OPENROUTER_HTTP_CODES = {429, 500, 502, 503, 504}
 
 
@@ -177,14 +178,14 @@ def transcribe_local(audio_path: Path, *, model_name: str, language: str, device
 def main() -> int:
     parser = argparse.ArgumentParser(description="Transcribe Telegram voice note.")
     parser.add_argument("audio")
-    parser.add_argument("--model", default="tiny")
+    parser.add_argument("--model", default=os.environ.get("TELEGRAM_VOICE_LOCAL_MODEL", DEFAULT_LOCAL_VOICE_MODEL))
     parser.add_argument("--language", default="ru")
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--compute-type", default="int8")
     parser.add_argument(
         "--provider",
         choices=["local", "openrouter"],
-        default=os.environ.get("TELEGRAM_VOICE_TRANSCRIPTION_PROVIDER", os.environ.get("TRANSCRIPTION_PROVIDER", "local")),
+        default=os.environ.get("TELEGRAM_VOICE_TRANSCRIPTION_PROVIDER", os.environ.get("TRANSCRIPTION_PROVIDER", "openrouter")),
     )
     parser.add_argument(
         "--openrouter-model",

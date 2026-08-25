@@ -12,6 +12,7 @@ ARTICLE="$RUN_DIR/roadmap-article.md"
 ARTICLE_HTML="$RUN_DIR/roadmap-article.html"
 DRAFT="$RUN_DIR/roadmap-article-draft.md"
 DRAFT_HTML="$RUN_DIR/roadmap-article-draft.html"
+NOTES="$RUN_DIR/teacher-notes.md"
 GEMINI_DIR="$RUN_DIR/gemini-rewrite"
 GEMINI_FINAL="$GEMINI_DIR/final.md"
 GEMINI_LOG="$RUN_DIR/gemini-rewrite.log"
@@ -21,6 +22,7 @@ CODEX_ARTICLE_SCRIPT="${CODEX_ARTICLE_SCRIPT:-/usr/local/bin/generate-article-wi
 GEMINI_REWRITE_SCRIPT="${GEMINI_REWRITE_SCRIPT:-/usr/local/bin/openrouter-gemini-chat-chain}"
 GEMINI_MODEL="${GEMINI_REWRITE_MODEL:-google/gemini-2.5-pro}"
 GEMINI_TIMEOUT_SECONDS="${GEMINI_REWRITE_TIMEOUT_SECONDS:-1200}"
+GEMINI_MAX_TOKENS="${GEMINI_REWRITE_MAX_TOKENS:-9000}"
 GEMINI_PRODUCTION_SAFE="${GEMINI_REWRITE_PRODUCTION_SAFE:-1}"
 MARKDOWN_TO_HTML="${ROADMAP_MARKDOWN_TO_HTML:-roadmap-markdown-to-html}"
 
@@ -55,7 +57,10 @@ except Exception:
 now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 for pair in pairs:
     key, value = pair.split("=", 1)
-    data[key] = value
+    if value == "__DELETE__":
+        data.pop(key, None)
+    else:
+        data[key] = value
 data["article_pipeline_updated_at"] = now
 
 with open(path, "w", encoding="utf-8") as handle:
@@ -74,19 +79,33 @@ fail_status() {
     "gemini_rewrite_validate_log=$GEMINI_VALIDATE_LOG"
 }
 
-update_status "article_pipeline=codex_then_gemini_rewrite" "article_status=started"
+update_status \
+  "article_pipeline=codex_then_gemini_rewrite" \
+  "article_status=started" \
+  "article_done_at=__DELETE__" \
+  "article_failed_at=__DELETE__" \
+  "gemini_rewrite_done_at=__DELETE__" \
+  "gemini_rewrite_failed_reason=__DELETE__"
 
-"$CODEX_ARTICLE_SCRIPT" "$RUN_DIR"
+if [[ -s "$DRAFT" && ( ! -s "$NOTES" || "$DRAFT" -nt "$NOTES" ) ]]; then
+  cp "$DRAFT" "$ARTICLE"
+  if [[ -s "$DRAFT_HTML" ]]; then
+    cp "$DRAFT_HTML" "$ARTICLE_HTML"
+  fi
+  update_status "article_draft_reused=true"
+else
+  "$CODEX_ARTICLE_SCRIPT" "$RUN_DIR"
 
-if [[ ! -s "$ARTICLE" ]]; then
-  fail_status "codex_article_missing"
-  echo "Codex article did not produce $ARTICLE" >&2
-  exit 1
-fi
+  if [[ ! -s "$ARTICLE" ]]; then
+    fail_status "codex_article_missing"
+    echo "Codex article did not produce $ARTICLE" >&2
+    exit 1
+  fi
 
-cp "$ARTICLE" "$DRAFT"
-if [[ -s "$ARTICLE_HTML" ]]; then
-  cp "$ARTICLE_HTML" "$DRAFT_HTML"
+  cp "$ARTICLE" "$DRAFT"
+  if [[ -s "$ARTICLE_HTML" ]]; then
+    cp "$ARTICLE_HTML" "$DRAFT_HTML"
+  fi
 fi
 
 update_status \
@@ -100,6 +119,7 @@ update_status \
 mkdir -p "$GEMINI_DIR"
 
 GEMINI_ARGS=("$DRAFT" --save-dir "$GEMINI_DIR" -m "$GEMINI_MODEL")
+GEMINI_ARGS+=(--max-tokens "$GEMINI_MAX_TOKENS")
 if [[ "$GEMINI_PRODUCTION_SAFE" != "0" ]]; then
   GEMINI_ARGS+=(--production-safe)
 fi
@@ -209,6 +229,10 @@ data["gemini_rewrite_model"] = model
 data["gemini_rewrite_dir"] = gemini_dir
 data["gemini_rewrite_final"] = gemini_final
 data["gemini_rewrite_final_bytes"] = os.path.getsize(gemini_final)
+data["article_retry_pending"] = False
+data.pop("article_failed_at", None)
+data.pop("article_last_error_at", None)
+data.pop("gemini_rewrite_failed_reason", None)
 if os.path.exists(html_path):
     data["html"] = html_path
     data["html_bytes"] = os.path.getsize(html_path)
