@@ -142,6 +142,40 @@ def register_run(registry_path: Path, run_dir: str, audio: str, chat_id: str) ->
     return key
 
 
+def activate_article(
+    registry_path: Path,
+    run_key: str,
+    run_dir: str,
+    audio: str,
+    chat_id: str,
+) -> int:
+    manifest = load_json(Path(run_dir) / "roadmap-article-blocks.json", {})
+    if not isinstance(manifest, dict) or not isinstance(manifest.get("article_version"), int):
+        raise RuntimeError("article manifest is missing after editor page preparation")
+    article_version = int(manifest["article_version"])
+    registry = load_json(registry_path, {"runs": {}})
+    if not isinstance(registry, dict):
+        raise RuntimeError("Telegram run registry is invalid")
+    active_articles = registry.setdefault("active_articles", {})
+    if not isinstance(active_articles, dict):
+        raise RuntimeError("active article registry is invalid")
+    active_articles[str(chat_id)] = {
+        "status": "active",
+        "run_key": run_key,
+        "run_dir": run_dir,
+        "audio": audio,
+        "article_version": article_version,
+        "activated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+        "source": "article_ready",
+    }
+    pending = registry.setdefault("pending_article_edits", {})
+    if not isinstance(pending, dict):
+        raise RuntimeError("pending article edit registry is invalid")
+    pending.pop(str(chat_id), None)
+    save_json(registry_path, registry)
+    return article_version
+
+
 def truncate_text(value: str, limit: int) -> str:
     value = value.strip()
     if len(value) <= limit:
@@ -709,6 +743,13 @@ def main() -> int:
             public_base_url,
             key,
             env.get("ROADMAP_ARTICLE_EDITOR", DEFAULT_ARTICLE_EDITOR),
+        )
+        activate_article(
+            Path(args.registry_file),
+            key,
+            args.run_dir,
+            args.audio,
+            str(chat_id),
         )
         text = build_article_message(run_dir, args.audio)
         article_pdf = ensure_article_pdf(run_dir)

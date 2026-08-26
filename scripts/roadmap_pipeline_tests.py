@@ -460,7 +460,16 @@ class ArticleSelectionSecurityTests(unittest.TestCase):
             registry = {
                 "runs": {
                     "run123": {"run_dir": str(run_dir), "audio": "lesson.m4a", "chat_id": "42"}
-                }
+                },
+                "active_articles": {
+                    "42": {
+                        "status": "active",
+                        "run_key": "run123",
+                        "run_dir": str(run_dir),
+                        "audio": "lesson.m4a",
+                        "article_version": 1,
+                    }
+                },
             }
 
             selected = WEBHOOK.update_article_selection(
@@ -497,6 +506,15 @@ class ArticleSelectionSecurityTests(unittest.TestCase):
             (run_dir / "roadmap-article-blocks.json").write_text(json.dumps(manifest), encoding="utf-8")
             registry = {
                 "runs": {"run123": {"run_dir": str(run_dir), "chat_id": "42"}},
+                "active_articles": {
+                    "42": {
+                        "status": "active",
+                        "run_key": "run123",
+                        "run_dir": str(run_dir),
+                        "audio": "lesson.m4a",
+                        "article_version": 1,
+                    }
+                },
                 "pending_article_edits": {
                     "42": {
                         "run_key": "run123",
@@ -511,6 +529,36 @@ class ArticleSelectionSecurityTests(unittest.TestCase):
             self.assertEqual(selected, ["b_001"])
             WEBHOOK.update_article_selection(registry, "42", "run123", 1, [], "set", "now")
             self.assertNotIn("42", registry["pending_article_edits"])
+
+    def test_selection_is_rejected_while_previous_article_edit_is_running(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            run_dir.mkdir()
+            article = "# Roadmap\n\nТекст.\n"
+            (run_dir / "roadmap-article.md").write_text(article, encoding="utf-8")
+            (run_dir / "roadmap-article-blocks.json").write_text(
+                json.dumps(ARTICLE_EDITOR.build_manifest(article)), encoding="utf-8"
+            )
+            (run_dir / "status.json").write_text(
+                json.dumps({"article_edit_status": "delivery_started"}), encoding="utf-8"
+            )
+            registry = {
+                "runs": {"run123": {"run_dir": str(run_dir), "audio": "lesson.m4a", "chat_id": "42"}},
+                "active_articles": {
+                    "42": {
+                        "status": "active",
+                        "run_key": "run123",
+                        "run_dir": str(run_dir),
+                        "audio": "lesson.m4a",
+                        "article_version": 1,
+                    }
+                },
+            }
+            with self.assertRaisesRegex(ValueError, "in progress"):
+                WEBHOOK.update_article_selection(
+                    registry, "42", "run123", 1, ["b_001"], "set", "now"
+                )
+            self.assertNotIn("pending_article_edits", registry)
 
 
 class ArticleEditWorkerTests(unittest.TestCase):
@@ -2137,6 +2185,231 @@ class WebhookApprovalTests(TempRunMixin, unittest.TestCase):
         sent_texts = [payload["text"] for method, payload in self.sent if method == "sendMessage"]
         self.assertTrue(any("выбранным блокам" in text for text in sent_texts))
 
+    def test_active_article_survives_consumed_selection_and_prompts_for_fresh_checkboxes(self) -> None:
+        article = "# Roadmap\n\nПервый блок.\n"
+        (self.run_dir / "roadmap-article.md").write_text(article, encoding="utf-8")
+        manifest = ARTICLE_EDITOR.build_manifest(article)
+        (self.run_dir / "roadmap-article-blocks.json").write_text(
+            json.dumps(manifest), encoding="utf-8"
+        )
+        registry = json.loads(self.registry.read_text(encoding="utf-8"))
+        registry["pending_reviews"] = {}
+        registry["active_articles"] = {
+            "42": {
+                "status": "active",
+                "run_key": "abc123",
+                "run_dir": str(self.run_dir),
+                "audio": "lesson.m4a",
+                "article_version": 1,
+            }
+        }
+        registry["pending_article_edits"] = {
+            "42": {
+                "run_key": "abc123",
+                "run_dir": str(self.run_dir),
+                "audio": "lesson.m4a",
+                "article_version": 1,
+                "selected_block_ids": ["b_001"],
+            }
+        }
+        self.registry.write_text(json.dumps(registry), encoding="utf-8")
+
+        with patch.object(WEBHOOK, "correction_text_from_message", return_value=("Сократи.", "voice")), \
+            patch.object(WEBHOOK, "start_article_edit_worker_async") as worker_mock:
+            self.handler().handle_message({"message_id": 601, "chat": {"id": 42}, "voice": {"file_id": "v1"}})
+            (self.run_dir / "status.json").write_text(
+                json.dumps({"article_edit_status": "done"}), encoding="utf-8"
+            )
+            self.handler().handle_message({"message_id": 602, "chat": {"id": 42}, "voice": {"file_id": "v2"}})
+
+        worker_mock.assert_called_once()
+        saved = json.loads(self.registry.read_text(encoding="utf-8"))
+        self.assertEqual(saved["active_articles"]["42"]["run_key"], "abc123")
+        self.assertNotIn("42", saved.get("pending_article_edits", {}))
+        sent_texts = [payload["text"] for method, payload in self.sent if method == "sendMessage"]
+        self.assertTrue(any("блоки checkbox" in text.lower() for text in sent_texts))
+        self.assertFalse(any("нет активной проверки" in text.lower() for text in sent_texts))
+
+    def test_second_voice_during_article_edit_does_not_create_parallel_job(self) -> None:
+        registry = json.loads(self.registry.read_text(encoding="utf-8"))
+        registry["pending_reviews"] = {}
+        registry["active_articles"] = {
+            "42": {
+                "status": "active",
+                "run_key": "abc123",
+                "run_dir": str(self.run_dir),
+                "audio": "lesson.m4a",
+                "article_version": 1,
+            }
+        }
+        self.registry.write_text(json.dumps(registry), encoding="utf-8")
+        (self.run_dir / "status.json").write_text(
+            json.dumps({"article_edit_status": "queued"}), encoding="utf-8"
+        )
+
+        with patch.object(WEBHOOK, "start_article_edit_worker_async") as worker_mock:
+            self.handler().handle_message({"message_id": 603, "chat": {"id": 42}, "voice": {"file_id": "v3"}})
+
+        worker_mock.assert_not_called()
+        sent_texts = [payload["text"] for method, payload in self.sent if method == "sendMessage"]
+        self.assertTrue(any("уже выполняется" in text.lower() for text in sent_texts))
+
+    def test_three_sequential_article_edits_each_require_fresh_checkbox_selection(self) -> None:
+        article = "# Roadmap\n\nВерсия 1.\n"
+        article_path = self.run_dir / "roadmap-article.md"
+        manifest_path = self.run_dir / "roadmap-article-blocks.json"
+        article_path.write_text(article, encoding="utf-8")
+        manifest = ARTICLE_EDITOR.build_manifest(article)
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        registry = json.loads(self.registry.read_text(encoding="utf-8"))
+        registry["pending_reviews"] = {}
+        registry["active_articles"] = {
+            "42": {
+                "status": "active",
+                "run_key": "abc123",
+                "run_dir": str(self.run_dir),
+                "audio": "lesson.m4a",
+                "article_version": 1,
+            }
+        }
+        self.registry.write_text(json.dumps(registry), encoding="utf-8")
+
+        with patch.object(WEBHOOK, "correction_text_from_message", return_value=("Измени блок.", "voice")), \
+            patch.object(WEBHOOK, "start_article_edit_worker_async") as worker_mock:
+            for cycle in range(1, 4):
+                registry = json.loads(self.registry.read_text(encoding="utf-8"))
+                selected = WEBHOOK.update_article_selection(
+                    registry, "42", "abc123", cycle, ["b_001"], "set", f"cycle-{cycle}"
+                )
+                self.assertEqual(selected, ["b_001"])
+                self.registry.write_text(json.dumps(registry), encoding="utf-8")
+                self.handler().handle_message({
+                    "message_id": 610 + cycle,
+                    "chat": {"id": 42},
+                    "voice": {"file_id": f"voice-{cycle}"},
+                })
+                saved = json.loads(self.registry.read_text(encoding="utf-8"))
+                self.assertNotIn("42", saved.get("pending_article_edits", {}))
+                self.assertEqual(saved["active_articles"]["42"]["article_version"], cycle)
+                (self.run_dir / "status.json").write_text(
+                    json.dumps({"article_edit_status": "done"}), encoding="utf-8"
+                )
+                if cycle < 3:
+                    next_article = f"# Roadmap\n\nВерсия {cycle + 1}.\n"
+                    article_path.write_text(next_article, encoding="utf-8")
+                    manifest = ARTICLE_EDITOR.build_manifest(next_article, previous=manifest)
+                    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+                    saved["active_articles"]["42"]["article_version"] = cycle + 1
+                    self.registry.write_text(json.dumps(saved), encoding="utf-8")
+
+        self.assertEqual(worker_mock.call_count, 3)
+
+    def test_closed_article_rejects_stale_checkbox_page(self) -> None:
+        article = "# Roadmap\n\nТекст.\n"
+        (self.run_dir / "roadmap-article.md").write_text(article, encoding="utf-8")
+        (self.run_dir / "roadmap-article-blocks.json").write_text(
+            json.dumps(ARTICLE_EDITOR.build_manifest(article)), encoding="utf-8"
+        )
+        registry = json.loads(self.registry.read_text(encoding="utf-8"))
+        registry["active_articles"] = {
+            "42": {"status": "closed", "reason": "new_audio", "closed_at": "now"}
+        }
+        with self.assertRaisesRegex(ValueError, "not active"):
+            WEBHOOK.update_article_selection(
+                registry, "42", "abc123", 1, ["b_001"], "set", "later"
+            )
+
+    def test_new_audio_closes_active_article_only_after_successful_accept(self) -> None:
+        registry = json.loads(self.registry.read_text(encoding="utf-8"))
+        registry["pending_reviews"] = {}
+        registry["active_articles"] = {
+            "42": {
+                "status": "active",
+                "run_key": "abc123",
+                "run_dir": str(self.run_dir),
+                "audio": "lesson.m4a",
+                "article_version": 1,
+            }
+        }
+        registry["pending_article_edits"] = {
+            "42": {
+                "run_key": "abc123",
+                "run_dir": str(self.run_dir),
+                "audio": "lesson.m4a",
+                "article_version": 1,
+                "selected_block_ids": ["b_001"],
+            }
+        }
+        self.registry.write_text(json.dumps(registry), encoding="utf-8")
+        message = {
+            "message_id": 604,
+            "chat": {"id": 42},
+            "document": {
+                "file_id": "new-call",
+                "file_unique_id": "new-call-unique",
+                "file_name": "new-call.m4a",
+                "mime_type": "audio/mp4",
+                "file_size": 123,
+            },
+        }
+        result = {
+            "status": "accepted",
+            "intake_id": "telegram:new-call",
+            "file_name": "new-call.m4a",
+            "local_path": "/tmp/new-call.m4a",
+            "inbox_path": "/tmp/inbox/new-call.m4a",
+        }
+
+        with patch.object(WEBHOOK, "accept_audio_message_for_pipeline", return_value=result), \
+            patch.object(WEBHOOK, "start_notion_archive_worker_async"):
+            self.handler().handle_message(message)
+
+        saved = json.loads(self.registry.read_text(encoding="utf-8"))
+        self.assertEqual(saved["active_articles"]["42"]["status"], "closed")
+        self.assertEqual(saved["active_articles"]["42"]["reason"], "new_audio")
+        self.assertNotIn("42", saved.get("pending_article_edits", {}))
+
+    def test_failed_new_audio_keeps_active_article_and_checkbox_selection(self) -> None:
+        registry = json.loads(self.registry.read_text(encoding="utf-8"))
+        registry["pending_reviews"] = {}
+        registry["active_articles"] = {
+            "42": {
+                "status": "active",
+                "run_key": "abc123",
+                "run_dir": str(self.run_dir),
+                "audio": "lesson.m4a",
+                "article_version": 1,
+            }
+        }
+        registry["pending_article_edits"] = {
+            "42": {
+                "run_key": "abc123",
+                "run_dir": str(self.run_dir),
+                "audio": "lesson.m4a",
+                "article_version": 1,
+                "selected_block_ids": ["b_001"],
+            }
+        }
+        self.registry.write_text(json.dumps(registry), encoding="utf-8")
+        message = {
+            "message_id": 605,
+            "chat": {"id": 42},
+            "audio": {
+                "file_id": "broken-call",
+                "file_unique_id": "broken-call-unique",
+                "file_name": "broken-call.m4a",
+                "mime_type": "audio/mp4",
+                "file_size": 123,
+            },
+        }
+
+        with patch.object(WEBHOOK, "accept_audio_message_for_pipeline", side_effect=RuntimeError("disk down")):
+            self.handler().handle_message(message)
+
+        saved = json.loads(self.registry.read_text(encoding="utf-8"))
+        self.assertEqual(saved["active_articles"]["42"]["status"], "active")
+        self.assertEqual(saved["pending_article_edits"]["42"]["selected_block_ids"], ["b_001"])
+
     def test_text_with_article_selection_uses_same_edit_flow(self) -> None:
         article = "# Roadmap\n\nПервый абзац.\n"
         (self.run_dir / "roadmap-article.md").write_text(article, encoding="utf-8")
@@ -2971,6 +3244,15 @@ class NotifyFormattingTests(unittest.TestCase):
 
         def fake_run(command: list[str], **_kwargs: object):
             commands.append(command)
+            if command and command[0].endswith("roadmap-article-editor"):
+                (self.run_dir / "roadmap-article-blocks.json").write_text(
+                    json.dumps({
+                        "schema_version": 2,
+                        "article_version": 3,
+                        "blocks": [],
+                    }),
+                    encoding="utf-8",
+                )
             return subprocess.CompletedProcess(command, 0)
 
         with patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "token"}, clear=False), \
@@ -3008,6 +3290,9 @@ class NotifyFormattingTests(unittest.TestCase):
         self.assertIn("prepare", editor_commands[0])
         saved_registry = json.loads((self.root / "registry.json").read_text(encoding="utf-8"))
         self.assertEqual(len(saved_registry["runs"]), 1)
+        self.assertEqual(saved_registry["active_articles"]["42"]["status"], "active")
+        self.assertEqual(saved_registry["active_articles"]["42"]["article_version"], 3)
+        self.assertNotIn("42", saved_registry.get("pending_article_edits", {}))
 
     def test_article_recovery_sends_two_choice_buttons(self) -> None:
         sent: list[dict[str, object]] = []

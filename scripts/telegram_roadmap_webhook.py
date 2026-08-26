@@ -147,6 +147,66 @@ def validate_telegram_webapp_init_data(
     return str(user_id)
 
 
+def resolve_active_article(registry: dict[str, Any], teacher_id: str) -> dict[str, Any] | None:
+    active_articles = registry.setdefault("active_articles", {})
+    if not isinstance(active_articles, dict):
+        raise ValueError("active article state is invalid")
+    existing = active_articles.get(str(teacher_id))
+    if isinstance(existing, dict):
+        return existing if existing.get("status") == "active" else None
+
+    runs = registry.get("runs", {})
+    candidates: list[tuple[str, str, dict[str, Any], dict[str, Any]]] = []
+    if isinstance(runs, dict):
+        for run_key, item in runs.items():
+            if not isinstance(item, dict) or str(item.get("chat_id") or "") != str(teacher_id):
+                continue
+            run_dir = Path(str(item.get("run_dir") or ""))
+            manifest = load_json(run_dir / "roadmap-article-blocks.json", {})
+            if not (run_dir / "roadmap-article.md").exists() or not isinstance(manifest, dict):
+                continue
+            version = manifest.get("article_version")
+            if not isinstance(version, int) or version < 1:
+                continue
+            candidates.append((str(item.get("updated_at") or ""), str(run_key), item, manifest))
+    if not candidates:
+        return None
+    _updated_at, run_key, item, manifest = max(candidates, key=lambda value: (value[0], value[1]))
+    run_dir = Path(str(item["run_dir"]))
+    active = {
+        "status": "active",
+        "run_key": run_key,
+        "run_dir": str(run_dir),
+        "audio": str(item.get("audio") or run_dir.name),
+        "article_version": int(manifest["article_version"]),
+        "activated_at": utc_now(),
+        "source": "legacy_registry_recovery",
+    }
+    active_articles[str(teacher_id)] = active
+    return active
+
+
+def article_edit_in_progress(active_article: dict[str, Any]) -> bool:
+    run_dir = Path(str(active_article.get("run_dir") or ""))
+    status = load_json(run_dir / "status.json", {})
+    return isinstance(status, dict) and status.get("article_edit_status") in {
+        "queued", "started", "delivery_started"
+    }
+
+
+def close_active_article(registry: dict[str, Any], teacher_id: str, reason: str, now: str) -> None:
+    active_articles = registry.setdefault("active_articles", {})
+    if not isinstance(active_articles, dict):
+        raise ValueError("active article state is invalid")
+    previous = active_articles.get(str(teacher_id), {})
+    closed = dict(previous) if isinstance(previous, dict) else {}
+    closed.update({"status": "closed", "reason": reason, "closed_at": now})
+    active_articles[str(teacher_id)] = closed
+    pending = registry.setdefault("pending_article_edits", {})
+    if isinstance(pending, dict):
+        pending.pop(str(teacher_id), None)
+
+
 def update_article_selection(
     registry: dict[str, Any],
     teacher_id: str,
@@ -162,6 +222,11 @@ def update_article_selection(
         raise ValueError("article run was not found")
     if str(item.get("chat_id") or "") != str(teacher_id):
         raise PermissionError("article owner does not match")
+    active_article = resolve_active_article(registry, teacher_id)
+    if not isinstance(active_article, dict) or active_article.get("run_key") != run_key:
+        raise ValueError("article is not active")
+    if active_article.get("article_version") != article_version:
+        raise ValueError("article version is stale")
     run_dir = Path(str(item.get("run_dir") or ""))
     manifest = load_json(run_dir / "roadmap-article-blocks.json", {})
     if not isinstance(manifest, dict) or manifest.get("article_version") != article_version:
@@ -174,6 +239,8 @@ def update_article_selection(
     }
     if action not in {"get", "set"}:
         raise ValueError("selection action is invalid")
+    if action == "set" and article_edit_in_progress(active_article):
+        raise ValueError("article edit is in progress")
     pending = registry.setdefault("pending_article_edits", {})
     if not isinstance(pending, dict):
         raise ValueError("pending article edit state is invalid")
@@ -1102,8 +1169,7 @@ def make_handler(config: dict[str, str]):
                     str(payload.get("action") or ""),
                     utc_now(),
                 )
-                if str(payload.get("action") or "") == "set":
-                    save_json(registry_file, registry)
+                save_json(registry_file, registry)
                 self.send_json(200, {"ok": True, "selected_block_ids": selected})
             except PermissionError:
                 self.send_json(403, {"ok": False, "error": "forbidden"})
@@ -1222,15 +1288,11 @@ def make_handler(config: dict[str, str]):
                 return
             pending = registry.get("pending_reviews", {}).get(str(chat_id))
             pending_edit = registry.get("pending_article_edits", {}).get(str(chat_id))
-            if not pending and isinstance(pending_edit, dict):
+            incoming_audio = extract_audio_message(message)
+            if not pending and isinstance(pending_edit, dict) and not incoming_audio:
                 has_correction = bool(
                     str(message.get("text", "")).strip()
                     or message.get("voice")
-                    or message.get("audio")
-                    or (
-                        message.get("document")
-                        and str(message["document"].get("mime_type", "")).startswith("audio/")
-                    )
                 )
                 if has_correction:
                     mark_telegram_message_processed(registry, message)
@@ -1283,6 +1345,40 @@ def make_handler(config: dict[str, str]):
                         "disable_web_page_preview": True,
                     }, api_base_url=api_base_url)
                     return
+            active_article = resolve_active_article(registry, str(chat_id))
+            if (
+                not pending
+                and not isinstance(pending_edit, dict)
+                and isinstance(active_article, dict)
+                and not incoming_audio
+                and (message.get("voice") or str(message.get("text", "")).strip())
+            ):
+                mark_telegram_message_processed(registry, message)
+                save_json(registry_file, registry)
+                if article_edit_in_progress(active_article):
+                    text = (
+                        "Предыдущая правка уже выполняется. Дождись новой версии статьи, "
+                        "открой её и заново выбери блоки checkbox для следующей правки."
+                    )
+                    stage = "telegram_article_edit_already_running"
+                else:
+                    text = (
+                        "Финальная статья активна. Открой актуальную версию по кнопке "
+                        "«Открыть красиво», выбери нужные блоки checkbox и отправь правку ещё раз."
+                    )
+                    stage = "telegram_article_edit_selection_required"
+                append_event(events_file, {
+                    "stage": stage,
+                    "chat_id": str(chat_id),
+                    "run_dir": str(active_article.get("run_dir") or ""),
+                    "article_version": active_article.get("article_version"),
+                })
+                safe_telegram_request(token, "sendMessage", {
+                    "chat_id": chat_id,
+                    "text": text,
+                    "disable_web_page_preview": True,
+                }, api_base_url=api_base_url)
+                return
             if not pending:
                 if message.get("voice"):
                     mark_telegram_message_processed(registry, message)
@@ -1374,6 +1470,8 @@ def make_handler(config: dict[str, str]):
                 if result.get("status") == "duplicate":
                     text = "Этот файл уже был принят раньше. Второй pipeline не запускаю."
                 else:
+                    close_active_article(registry, str(chat_id), "new_audio", utc_now())
+                    save_json(registry_file, registry)
                     start_pipeline_async()
                     start_notion_archive_worker_async(config, str(result.get("intake_id") or ""))
                     text = "Файл принят. Pipeline запущен, Notion-архивация идёт отдельно."
