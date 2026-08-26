@@ -58,6 +58,7 @@ source: telegram
 - `notion-webhook-receiver.service`
 - `notion-pipeline-poll.timer`
 - `telegram-roadmap-webhook.service`
+- `telegram-bot-api-local.service`
 
 ## Important Runtime Paths
 
@@ -81,6 +82,7 @@ source: telegram
 - `/usr/local/bin/generate-verification-with-codex`
 - `/usr/local/bin/telegram-roadmap-notify`
 - `/usr/local/bin/telegram-roadmap-webhook`
+- `/usr/local/bin/roadmap-article-editor`
 - `/usr/local/bin/process-approved-roadmaps`
 - `/usr/local/bin/generate-article-with-codex`
 - `/usr/local/bin/generate-article-with-gemini-rewrite`
@@ -108,7 +110,30 @@ source: telegram
 & 'C:\Users\bests\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' scripts\roadmap_pipeline_tests.py
 ```
 
-Latest known local result: `89/89 OK` on Windows (`2` POSIX-only wrapper tests skipped) and `89/89 OK` on the VPS.
+Latest clean VPS result: `120/120 OK` on commit `6d9980a`.
+
+Latest deployed final-article editing (2026-08-26):
+
+- Commits `3a161a4` and `6d9980a` are deployed on the VPS.
+- The public final-article reader assigns fixed paragraph IDs and numbers for
+  the current article version. The teacher can select paragraphs and then send
+  one text or voice correction in Telegram.
+- Telegram WebApp selection is bound to the signed teacher identity, run owner,
+  current article version, and known paragraph IDs. Repeated Telegram updates
+  and completed edit jobs are idempotent.
+- Gemini Pro receives the complete article as style context but may return
+  operations only for the selected paragraphs. The server validates the strict
+  JSON patch and merges it deterministically; unselected text and article order
+  remain unchanged.
+- A successful edit creates a new article version and sends fresh HTML/PDF.
+  Invalid model output is retried once and cannot replace the current article.
+- Production gates passed: full `120/120` suite, `roadmap-pipeline-doctor`,
+  webhook health on `127.0.0.1:8792`, runtime/source byte comparison, unsigned
+  request rejection, release secret scan, and isolated editor/render smoke.
+- No real Gemini call or signed Telegram WebApp interaction was used during the
+  deployment gate.
+- Production backup before this deployment:
+  `/var/backups/zoom-audio-pipeline/6d9980a-pre-20260826-201838`.
 
 Latest deployed Telegram repeat-intake behavior (2026-08-26):
 
