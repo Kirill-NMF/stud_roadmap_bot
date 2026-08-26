@@ -483,6 +483,8 @@ def write_intake_sidecar(inbox_path: Path, entry: dict[str, Any]) -> Path:
             "local_path",
             "inbox_path",
             "telegram_chat_id",
+            "telegram_message_id",
+            "telegram_message_key",
             "telegram_file_unique_id",
         )
         if entry.get(key) is not None
@@ -491,7 +493,15 @@ def write_intake_sidecar(inbox_path: Path, entry: dict[str, Any]) -> Path:
     return sidecar
 
 
-def telegram_intake_id(audio: dict[str, Any], local_path: Path | None = None) -> str:
+def telegram_intake_id(
+    audio: dict[str, Any],
+    local_path: Path | None = None,
+    message: dict[str, Any] | None = None,
+) -> str:
+    message_key = telegram_message_key(message or {})
+    if message_key:
+        # A resend or forward is a new intake; only a replay of the same message is a duplicate.
+        return "telegram-message:" + message_key
     file_unique_id = str(audio.get("file_unique_id") or "").strip()
     if file_unique_id:
         return "telegram:" + file_unique_id
@@ -577,7 +587,7 @@ def accept_audio_message_for_pipeline(config: dict[str, str], token: str, messag
     state_path = Path(config.get("telegram_notion_intake_state", DEFAULT_TELEGRAM_NOTION_INTAKE_STATE))
     state = load_json(state_path, {"files": {}})
     files = state.setdefault("files", {})
-    preliminary_intake_id = telegram_intake_id(audio)
+    preliminary_intake_id = telegram_intake_id(audio, message=message)
     if preliminary_intake_id in files:
         return {**files[preliminary_intake_id], "status": "duplicate"}
 
@@ -591,7 +601,7 @@ def accept_audio_message_for_pipeline(config: dict[str, str], token: str, messag
         api_base_url=api_base_url,
         local_bot_api_root=Path(config.get("local_bot_api_root", DEFAULT_LOCAL_BOT_API_ROOT)),
     )
-    intake_id = telegram_intake_id(audio, local_path)
+    intake_id = telegram_intake_id(audio, local_path=local_path, message=message)
     if intake_id in files:
         local_path.unlink(missing_ok=True)
         return {**files[intake_id], "status": "duplicate"}
@@ -607,6 +617,8 @@ def accept_audio_message_for_pipeline(config: dict[str, str], token: str, messag
         "inbox_path": str(inbox_path),
         "mime_type": str(audio.get("mime_type") or mimetypes.guess_type(local_path.name)[0] or "application/octet-stream"),
         "telegram_chat_id": str(message.get("chat", {}).get("id") or ""),
+        "telegram_message_id": str(message.get("message_id") or ""),
+        "telegram_message_key": telegram_message_key(message),
         "telegram_file_unique_id": str(audio.get("file_unique_id") or ""),
         "pipeline_status": "pipeline_started",
         "pipeline_started_at": now,

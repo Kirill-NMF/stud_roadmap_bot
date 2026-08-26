@@ -840,6 +840,20 @@ class ProcessNewAudioIntakeNotifyTests(unittest.TestCase):
         self.assertIn(".ogg", PROCESS_AUDIO.AUDIO_SUFFIXES)
         self.assertIn(".opus", PROCESS_AUDIO.AUDIO_SUFFIXES)
 
+    def test_identical_audio_in_distinct_inbox_paths_gets_distinct_process_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            inbox = Path(tmp) / "inbox"
+            inbox.mkdir()
+            first = inbox / "lesson.m4a"
+            second = inbox / "lesson-2.m4a"
+            first.write_bytes(b"same audio")
+            second.write_bytes(b"same audio")
+
+            first_key = PROCESS_AUDIO.file_key(first)
+            second_key = PROCESS_AUDIO.file_key(second)
+
+        self.assertNotEqual(first_key, second_key)
+
     def test_telegram_intake_sidecar_adds_chat_id_to_notify_args(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1384,6 +1398,54 @@ class WebhookApprovalTests(TempRunMixin, unittest.TestCase):
         self.assertEqual(len(sent_messages), 2)
         self.assertFalse(any("уже был принят" in payload["text"] for payload in sent_messages))
 
+    def test_same_file_in_forwarded_new_message_starts_second_pipeline(self) -> None:
+        self.registry.write_text(json.dumps({"runs": {}, "pending_reviews": {}}, ensure_ascii=False), encoding="utf-8")
+        results = [
+            {
+                "status": "accepted",
+                "intake_id": "telegram-message:42:2001",
+                "file_name": "zoom-call.m4a",
+                "local_path": "/var/lib/zoom-audio-pipeline/telegram-intake/zoom-call.m4a",
+                "inbox_path": "/var/lib/zoom-audio-pipeline/inbox/zoom-call.m4a",
+            },
+            {
+                "status": "accepted",
+                "intake_id": "telegram-message:42:2002",
+                "file_name": "zoom-call-2.m4a",
+                "local_path": "/var/lib/zoom-audio-pipeline/telegram-intake/zoom-call-2.m4a",
+                "inbox_path": "/var/lib/zoom-audio-pipeline/inbox/zoom-call-2.m4a",
+            },
+        ]
+        document = {
+            "file_id": "same-file-id",
+            "file_unique_id": "same-unique-id",
+            "file_name": "zoom-call.m4a",
+            "mime_type": "audio/mp4",
+            "file_size": 123,
+        }
+        first = {"message_id": 2001, "chat": {"id": 42}, "document": dict(document)}
+        forwarded = {
+            "message_id": 2002,
+            "chat": {"id": 42},
+            "forward_origin": {"type": "user"},
+            "document": dict(document),
+        }
+
+        with patch.object(WEBHOOK, "accept_audio_message_for_pipeline", side_effect=results) as accept_mock, \
+            patch.object(WEBHOOK, "start_notion_archive_worker_async") as worker_mock:
+            self.handler().handle_message(first)
+            self.handler().handle_message(forwarded)
+
+        self.assertEqual(accept_mock.call_count, 2)
+        self.assertEqual(self.start_mock.call_count, 2)
+        self.assertEqual(worker_mock.call_count, 2)
+        self.assertEqual(
+            [call.args[1] for call in worker_mock.call_args_list],
+            ["telegram-message:42:2001", "telegram-message:42:2002"],
+        )
+        sent_messages = [payload for method, payload in self.sent if method == "sendMessage"]
+        self.assertFalse(any("уже был принят" in payload["text"] for payload in sent_messages))
+
     def test_large_audio_without_pending_reports_limit_without_starting_pipeline(self) -> None:
         self.registry.write_text(json.dumps({"runs": {}, "pending_reviews": {}}, ensure_ascii=False), encoding="utf-8")
         message = {
@@ -1587,49 +1649,134 @@ class TelegramNotionIntakeTests(unittest.TestCase):
         self.assertEqual([part for part, _size in sent_parts], [1, 2, 3])
         self.assertEqual(sum(size for _part, size in sent_parts), WEBHOOK.NOTION_SINGLE_PART_MAX_BYTES + 1)
 
-    def test_accept_audio_message_is_idempotent_by_telegram_unique_id(self) -> None:
+    def test_accept_audio_message_allows_same_file_in_forwarded_new_message(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_path = root / "state.json"
+            config = {
+                "telegram_notion_intake_state": str(state_path),
+                "telegram_intake_dir": str(root / "intake"),
+                "inbox_dir": str(root / "inbox"),
+                "telegram_cloud_max_download_bytes": "20971520",
+            }
+            audio = {
+                "file_id": "same-file-id",
+                "file_unique_id": "same-unique-id",
+                "file_name": "existing.m4a",
+                "mime_type": "audio/mp4",
+            }
+
+            def fake_download(_token, _file_id, destination, **_kwargs):
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(b"same audio")
+
+            with patch.object(WEBHOOK, "download_telegram_file", side_effect=fake_download) as download_mock:
+                first = WEBHOOK.accept_audio_message_for_pipeline(
+                    config,
+                    "token",
+                    {"message_id": 3001, "chat": {"id": 42}, "audio": dict(audio)},
+                )
+                forwarded = WEBHOOK.accept_audio_message_for_pipeline(
+                    config,
+                    "token",
+                    {
+                        "message_id": 3002,
+                        "chat": {"id": 42},
+                        "forward_origin": {"type": "user"},
+                        "audio": dict(audio),
+                    },
+                )
+
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(first["status"], "accepted")
+        self.assertEqual(forwarded["status"], "accepted")
+        self.assertEqual(first["intake_id"], "telegram-message:42:3001")
+        self.assertEqual(forwarded["intake_id"], "telegram-message:42:3002")
+        self.assertNotEqual(first["inbox_path"], forwarded["inbox_path"])
+        self.assertEqual(download_mock.call_count, 2)
+        self.assertIn("telegram-message:42:3001", state["files"])
+        self.assertIn("telegram-message:42:3002", state["files"])
+
+    def test_accept_audio_message_replay_of_same_message_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = {
+                "telegram_notion_intake_state": str(root / "state.json"),
+                "telegram_intake_dir": str(root / "intake"),
+                "inbox_dir": str(root / "inbox"),
+                "telegram_cloud_max_download_bytes": "20971520",
+            }
+            message = {
+                "message_id": 4001,
+                "chat": {"id": 42},
+                "document": {
+                    "file_id": "file-id",
+                    "file_unique_id": "file-unique-id",
+                    "file_name": "existing.m4a",
+                    "mime_type": "audio/mp4",
+                },
+            }
+
+            def fake_download(_token, _file_id, destination, **_kwargs):
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(b"audio")
+
+            with patch.object(WEBHOOK, "download_telegram_file", side_effect=fake_download) as download_mock:
+                first = WEBHOOK.accept_audio_message_for_pipeline(config, "token", message)
+                replay = WEBHOOK.accept_audio_message_for_pipeline(config, "token", message)
+
+        self.assertEqual(first["status"], "accepted")
+        self.assertEqual(replay["status"], "duplicate")
+        self.assertEqual(replay["intake_id"], "telegram-message:42:4001")
+        download_mock.assert_called_once()
+
+    def test_legacy_file_unique_entry_does_not_block_new_message(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             state_path = root / "state.json"
             state_path.write_text(
-                json.dumps(
-                    {
-                        "files": {
-                            "telegram:tg-unique": {
-                                "status": "accepted",
-                                "intake_id": "telegram:tg-unique",
-                                "file_name": "existing.m4a",
-                                "pipeline_status": "pipeline_started",
-                                "notion_upload_status": "uploaded",
-                            }
+                json.dumps({
+                    "files": {
+                        "telegram:file-unique-id": {
+                            "status": "accepted",
+                            "intake_id": "telegram:file-unique-id",
+                            "file_name": "existing.m4a",
                         }
-                    },
-                    ensure_ascii=False,
-                ),
+                    }
+                }),
                 encoding="utf-8",
             )
-            result = WEBHOOK.accept_audio_message_for_pipeline(
-                {
-                    "telegram_notion_intake_state": str(state_path),
-                    "telegram_intake_dir": str(root / "intake"),
-                    "inbox_dir": str(root / "inbox"),
-                    "telegram_cloud_max_download_bytes": "20971520",
-                    "notion_api_key": "unused",
-                    "notion_target": "https://notion.so/3b635d73584c80368c5bcfeb579c16d8",
+            config = {
+                "telegram_notion_intake_state": str(state_path),
+                "telegram_intake_dir": str(root / "intake"),
+                "inbox_dir": str(root / "inbox"),
+                "telegram_cloud_max_download_bytes": "20971520",
+            }
+            message = {
+                "message_id": 5001,
+                "chat": {"id": 42},
+                "document": {
+                    "file_id": "file-id",
+                    "file_unique_id": "file-unique-id",
+                    "file_name": "existing.m4a",
+                    "mime_type": "audio/mp4",
                 },
-                "token",
-                {
-                    "audio": {
-                        "file_id": "file-id",
-                        "file_unique_id": "tg-unique",
-                        "file_name": "existing.m4a",
-                        "mime_type": "audio/mp4",
-                    }
-                },
-            )
+            }
 
-        self.assertEqual(result["status"], "duplicate")
-        self.assertEqual(result["intake_id"], "telegram:tg-unique")
+            def fake_download(_token, _file_id, destination, **_kwargs):
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(b"audio")
+
+            with patch.object(WEBHOOK, "download_telegram_file", side_effect=fake_download):
+                result = WEBHOOK.accept_audio_message_for_pipeline(config, "token", message)
+
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(result["status"], "accepted")
+        self.assertEqual(result["intake_id"], "telegram-message:42:5001")
+        self.assertIn("telegram:file-unique-id", state["files"])
+        self.assertIn("telegram-message:42:5001", state["files"])
 
     def test_large_audio_message_is_rejected_before_download(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, patch.object(WEBHOOK, "download_telegram_file") as download_mock:
