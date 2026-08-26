@@ -59,6 +59,7 @@ for path in \
   /usr/local/bin/generate-verification-with-openrouter \
   /usr/local/bin/generate-article-with-openrouter \
   /usr/local/bin/generate-article-with-codex \
+  /usr/local/bin/run-codex-article-hedge \
   /usr/local/bin/generate-article-with-gemini-rewrite \
   /usr/local/bin/validate-gemini-rewrite \
   /usr/local/bin/openrouter-gemini-chat-chain; do

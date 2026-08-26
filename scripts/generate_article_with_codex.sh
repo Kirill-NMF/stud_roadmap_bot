@@ -18,13 +18,18 @@ PROMPT="$RUN_DIR/codex-article.prompt.md"
 LAST="$RUN_DIR/codex-article-last-message.md"
 STATUS="$RUN_DIR/status.json"
 LOCK="$RUN_DIR/codex-article.lock"
+HEDGE_RESULT="$RUN_DIR/codex-article-hedge-result.json"
 
 CODEX_BIN="${CODEX_BIN:-codex}"
 MODEL="${CODEX_ARTICLE_MODEL:-gpt-5.6-terra}"
 REASONING="${CODEX_ARTICLE_REASONING_EFFORT:-high}"
-ATTEMPTS="${CODEX_ARTICLE_ATTEMPTS:-2}"
-TIMEOUT_SECONDS="${CODEX_ARTICLE_TIMEOUT_SECONDS:-80}"
-RETRY_DELAY_SECONDS="${CODEX_ARTICLE_RETRY_DELAY_SECONDS:-3}"
+HEDGE_RUNNER="${CODEX_ARTICLE_HEDGE_RUNNER:-/usr/local/bin/run-codex-article-hedge}"
+HEDGE_DELAY_SECONDS="${CODEX_ARTICLE_HEDGE_DELAY_SECONDS:-65}"
+FALLBACK_AFTER_SECONDS="${CODEX_ARTICLE_FALLBACK_AFTER_SECONDS:-145}"
+PRIMARY_TIMEOUT_SECONDS="${CODEX_ARTICLE_PRIMARY_TIMEOUT_SECONDS:-900}"
+HEDGE_TIMEOUT_SECONDS="${CODEX_ARTICLE_HEDGE_TIMEOUT_SECONDS:-${CODEX_ARTICLE_TIMEOUT_SECONDS:-80}}"
+FALLBACK_TIMEOUT_SECONDS="${CODEX_ARTICLE_FALLBACK_TIMEOUT_SECONDS:-900}"
+POLL_INTERVAL_SECONDS="${CODEX_ARTICLE_POLL_INTERVAL_SECONDS:-0.25}"
 MIN_OUTPUT_BYTES="${CODEX_ARTICLE_MIN_OUTPUT_BYTES:-200}"
 FALLBACK_SCRIPT="${CODEX_ARTICLE_FALLBACK_SCRIPT:-/usr/local/bin/generate-article-with-openrouter}"
 MARKDOWN_TO_HTML="${ROADMAP_MARKDOWN_TO_HTML:-roadmap-markdown-to-html}"
@@ -41,14 +46,12 @@ for required in "$TRANSCRIPT" "$VERIFICATION" "$PROMPT_TEMPLATE"; do
   fi
 done
 
-if [[ ! "$ATTEMPTS" =~ ^[1-9][0-9]*$ ]] || [[ ! "$TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] || \
-   [[ ! "$RETRY_DELAY_SECONDS" =~ ^[0-9]+$ ]] || [[ ! "$MIN_OUTPUT_BYTES" =~ ^[1-9][0-9]*$ ]]; then
-  echo "invalid Codex article retry, timeout, delay, or output-size setting" >&2
-  exit 2
-fi
-
 if [[ ! -x "$FALLBACK_SCRIPT" ]]; then
   echo "OpenRouter article fallback is not executable: $FALLBACK_SCRIPT" >&2
+  exit 2
+fi
+if [[ ! -f "$HEDGE_RUNNER" ]]; then
+  echo "Codex article hedge runner was not found: $HEDGE_RUNNER" >&2
   exit 2
 fi
 
@@ -98,6 +101,7 @@ update_status \
   "article_generation_model=$MODEL" \
   "article_generation_reasoning_effort=$REASONING" \
   "article_codex_attempts=0" \
+  "article_hedge_status=waiting" \
   "article_started_at=__NOW__" \
   "article_fallback_reason=__DELETE__" \
   "article_codex_last_error=__DELETE__" \
@@ -127,102 +131,109 @@ update_status \
   cat "$TRANSCRIPT"
 } > "$PROMPT"
 
-LAST_REASON="codex_cli_failed"
-SUCCESS=0
-for ((attempt = 1; attempt <= ATTEMPTS; attempt++)); do
-  ATTEMPT_OUT="$(mktemp "$RUN_DIR/.codex-article-attempt.XXXXXX.md")"
-  ATTEMPT_LOG="$RUN_DIR/codex-article-attempt-${attempt}.log"
+set +e
+python3 "$HEDGE_RUNNER" "$RUN_DIR" \
+  --prompt "$PROMPT" \
+  --output "$OUT" \
+  --last-output "$LAST" \
+  --result "$HEDGE_RESULT" \
+  --codex-bin "$CODEX_BIN" \
+  --model "$MODEL" \
+  --reasoning "$REASONING" \
+  --fallback-script "$FALLBACK_SCRIPT" \
+  --hedge-delay "$HEDGE_DELAY_SECONDS" \
+  --fallback-after "$FALLBACK_AFTER_SECONDS" \
+  --primary-timeout "$PRIMARY_TIMEOUT_SECONDS" \
+  --hedge-timeout "$HEDGE_TIMEOUT_SECONDS" \
+  --fallback-timeout "$FALLBACK_TIMEOUT_SECONDS" \
+  --poll-interval "$POLL_INTERVAL_SECONDS" \
+  --minimum-bytes "$MIN_OUTPUT_BYTES"
+RACE_EXIT=$?
+set -e
 
-  set +e
-  timeout "$TIMEOUT_SECONDS" "$CODEX_BIN" --disable shell_tool -a never exec \
-    --skip-git-repo-check \
-    --ephemeral \
-    --model "$MODEL" \
-    -c "model_reasoning_effort=\"$REASONING\"" \
-    --cd "$RUN_DIR" \
-    --sandbox read-only \
-    --output-last-message "$ATTEMPT_OUT" \
-    - < "$PROMPT" > "$ATTEMPT_LOG" 2>&1
-  EXIT_CODE=$?
-  set -e
-
-  if [[ "$EXIT_CODE" -eq 0 ]] && [[ -s "$ATTEMPT_OUT" ]] && \
-     [[ "$(wc -c < "$ATTEMPT_OUT")" -ge "$MIN_OUTPUT_BYTES" ]]; then
-    mv -f "$ATTEMPT_OUT" "$OUT"
-    cp "$OUT" "$LAST"
-    SUCCESS=1
-    update_status "article_codex_attempts=$attempt" "article_log=$ATTEMPT_LOG"
-    break
-  fi
-
-  if [[ "$EXIT_CODE" -ne 0 ]]; then
-    LAST_REASON="codex_cli_exit_$EXIT_CODE"
-  elif [[ ! -s "$ATTEMPT_OUT" ]]; then
-    LAST_REASON="codex_cli_empty_output"
-  else
-    LAST_REASON="codex_cli_obviously_truncated_output"
-  fi
-  rm -f "$ATTEMPT_OUT"
-  update_status "article_codex_attempts=$attempt" "article_log=$ATTEMPT_LOG"
-  if [[ "$attempt" -lt "$ATTEMPTS" ]] && [[ "$RETRY_DELAY_SECONDS" -gt 0 ]]; then
-    sleep "$RETRY_DELAY_SECONDS"
-  fi
-done
-
-if [[ "$SUCCESS" -eq 1 ]]; then
-  if command -v "$MARKDOWN_TO_HTML" >/dev/null 2>&1; then
-    "$MARKDOWN_TO_HTML" "$OUT" -o "$HTML_OUT"
-  fi
+if [[ "$RACE_EXIT" -ne 0 ]] || [[ ! -s "$OUT" ]] || [[ ! -s "$HEDGE_RESULT" ]]; then
   DURATION="$(( $(date +%s) - STARTED_AT_EPOCH ))"
-  STATUS_ARGS=(
-    "article_status=done" \
-    "article_generation_provider=codex_cli" \
-    "article_generation_duration_seconds=$DURATION" \
-    "article_fallback_reason=__DELETE__" \
-    "article_failed_at=__DELETE__" \
-    "article_done_at=__NOW__" \
-    "article=$OUT" \
-    "article_bytes=$(wc -c < "$OUT")"
-  )
-  if [[ -s "$HTML_OUT" ]]; then
-    STATUS_ARGS+=("html=$HTML_OUT" "html_bytes=$(wc -c < "$HTML_OUT")")
-  fi
-  update_status "${STATUS_ARGS[@]}"
-else
-  FALLBACK_REASON="codex_cli_failed_after_${ATTEMPTS}_attempts"
-  update_status \
-    "article_generation_provider=openrouter_fallback_pending" \
-    "article_fallback_reason=$FALLBACK_REASON" \
-    "article_codex_last_error=$LAST_REASON"
+  python3 - "$STATUS" "$HEDGE_RESULT" "$DURATION" <<'PY'
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
 
-  if ! "$FALLBACK_SCRIPT" "$RUN_DIR"; then
-    DURATION="$(( $(date +%s) - STARTED_AT_EPOCH ))"
-    update_status \
-      "article_status=failed" \
-      "article_generation_provider=failed" \
-      "article_generation_duration_seconds=$DURATION" \
-      "article_failed_at=__NOW__"
-    echo "Codex CLI and OpenRouter article fallback both failed" >&2
-    exit 1
-  fi
-  if [[ ! -s "$OUT" ]]; then
-    update_status \
-      "article_status=failed" \
-      "article_generation_provider=failed" \
-      "article_failed_at=__NOW__"
-    echo "OpenRouter article fallback returned no article" >&2
-    exit 1
-  fi
-  DURATION="$(( $(date +%s) - STARTED_AT_EPOCH ))"
-  update_status \
-    "article_status=done" \
-    "article_generation_provider=openrouter_fallback" \
-    "article_generation_duration_seconds=$DURATION" \
-    "article_fallback_reason=$FALLBACK_REASON" \
-    "article_done_at=__NOW__" \
-    "article=$OUT" \
-    "article_bytes=$(wc -c < "$OUT")"
+status_path, result_path = map(Path, sys.argv[1:3])
+duration = int(sys.argv[3])
+try:
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+except Exception:
+    status = {}
+try:
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+except Exception:
+    result = {}
+now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+status.update({
+    "article_status": "failed",
+    "article_generation_provider": "failed",
+    "article_generation_duration_seconds": duration,
+    "article_codex_attempts": int(result.get("codex_attempts_started", 0)),
+    "article_hedge_status": "failed",
+    "article_fallback_started": bool(result.get("fallback_started", False)),
+    "article_codex_last_error": result.get("last_error", "hedge_runner_failed"),
+    "article_failed_at": now,
+    "article_pipeline_updated_at": now,
+})
+temporary = status_path.with_suffix(status_path.suffix + ".tmp")
+temporary.write_text(json.dumps(status, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+temporary.replace(status_path)
+PY
+  echo "Codex hedge and OpenRouter fallback returned no valid article" >&2
+  exit 1
 fi
+
+if command -v "$MARKDOWN_TO_HTML" >/dev/null 2>&1; then
+  "$MARKDOWN_TO_HTML" "$OUT" -o "$HTML_OUT"
+fi
+
+python3 - "$STATUS" "$HEDGE_RESULT" "$OUT" "$HTML_OUT" <<'PY'
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+status_path, result_path, article_path, html_path = map(Path, sys.argv[1:])
+try:
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+except Exception:
+    status = {}
+result = json.loads(result_path.read_text(encoding="utf-8"))
+now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+provider = result["provider"]
+status.update({
+    "article_status": "done",
+    "article_generation_provider": provider,
+    "article_generation_duration_seconds": int(round(float(result["duration_seconds"]))),
+    "article_codex_attempts": int(result["codex_attempts_started"]),
+    "article_hedge_status": "won" if result["winner"] == "codex_hedge" else "completed",
+    "article_hedge_winner": result["winner"],
+    "article_fallback_started": bool(result["fallback_started"]),
+    "article_log": result["winner_log"],
+    "article_done_at": now,
+    "article": str(article_path),
+    "article_bytes": article_path.stat().st_size,
+})
+if html_path.exists():
+    status["html"] = str(html_path)
+    status["html_bytes"] = html_path.stat().st_size
+if provider == "openrouter_fallback":
+    status["article_fallback_reason"] = "codex_no_valid_result_before_fallback"
+else:
+    status.pop("article_fallback_reason", None)
+status.pop("article_codex_last_error", None)
+status.pop("article_failed_at", None)
+status["article_pipeline_updated_at"] = now
+temporary = status_path.with_suffix(status_path.suffix + ".tmp")
+temporary.write_text(json.dumps(status, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+temporary.replace(status_path)
+PY
 
 printf '%s\n' "$OUT"
 if [[ -s "$HTML_OUT" ]]; then

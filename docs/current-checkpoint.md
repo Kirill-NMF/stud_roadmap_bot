@@ -163,6 +163,16 @@ Deployed Codex latency policy (2026-08-26):
 - Production backup before this deployment:
   `/var/backups/zoom-audio-pipeline/7e67f31-pre`.
 
+Pending hedged Codex policy (2026-08-26):
+
+- Keep the primary `gpt-5.6-terra` high-reasoning request alive instead of
+  terminating it at 80 seconds.
+- If no valid article is ready after 65 seconds, start a second isolated Codex
+  request. If neither request has won by 145 seconds, start the OpenRouter
+  fallback in an isolated temporary run directory.
+- The first valid output is committed atomically. All losing process groups are
+  terminated, and only the winner can continue to Gemini.
+
 Latest deployed recovery (2026-08-26):
 
 - Commits through `921c85c` are deployed on the VPS.

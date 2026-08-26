@@ -163,17 +163,22 @@ class PromptRuleTests(unittest.TestCase):
 class CodexArticleScriptTests(unittest.TestCase):
     def test_codex_article_wrapper_has_terra_retry_and_fallback_contract(self) -> None:
         script = (ROOT / "scripts/generate_article_with_codex.sh").read_text(encoding="utf-8")
+        runner = (ROOT / "scripts/run_codex_article_hedge.py").read_text(encoding="utf-8")
         self.assertIn('CODEX_ARTICLE_MODEL:-gpt-5.6-terra', script)
         self.assertIn('CODEX_ARTICLE_REASONING_EFFORT:-high', script)
-        self.assertIn('CODEX_ARTICLE_ATTEMPTS:-2', script)
-        self.assertIn('CODEX_ARTICLE_TIMEOUT_SECONDS:-80', script)
+        self.assertIn('CODEX_ARTICLE_HEDGE_DELAY_SECONDS:-65', script)
+        self.assertIn('CODEX_ARTICLE_FALLBACK_AFTER_SECONDS:-145', script)
+        self.assertIn('CODEX_ARTICLE_PRIMARY_TIMEOUT_SECONDS:-900', script)
+        self.assertIn('CODEX_ARTICLE_HEDGE_TIMEOUT_SECONDS:-${CODEX_ARTICLE_TIMEOUT_SECONDS:-80}', script)
+        self.assertIn('CODEX_ARTICLE_HEDGE_RUNNER:-/usr/local/bin/run-codex-article-hedge', script)
         self.assertIn('CODEX_ARTICLE_FALLBACK_SCRIPT:-/usr/local/bin/generate-article-with-openrouter', script)
-        self.assertIn('model_reasoning_effort=', script)
+        self.assertIn('model_reasoning_effort=', runner)
         self.assertIn('article_generation_provider', script)
         self.assertIn('article_codex_attempts', script)
         self.assertIn('article_fallback_reason', script)
-        self.assertIn('mktemp', script)
-        self.assertIn('< "$PROMPT"', script)
+        self.assertIn('tempfile.mkstemp', runner)
+        self.assertIn('start_new_session=True', runner)
+        self.assertIn('winner_lock.mkdir()', runner)
 
     @unittest.skipUnless(Path("/bin/bash").exists(), "requires a POSIX shell")
     def test_codex_success_does_not_call_openrouter_fallback(self) -> None:
@@ -205,9 +210,29 @@ class CodexArticleScriptTests(unittest.TestCase):
         self.assertTrue(fallback_called)
         self.assertEqual(status["article_generation_provider"], "openrouter_fallback")
         self.assertEqual(status["article_codex_attempts"], 2)
-        self.assertEqual(status["article_fallback_reason"], "codex_cli_failed_after_2_attempts")
+        self.assertEqual(status["article_fallback_reason"], "codex_no_valid_result_before_fallback")
 
-    def _run_wrapper(self, *, failures_before_success: int) -> tuple[subprocess.CompletedProcess[str], dict[str, object], list[list[str]], bool]:
+    @unittest.skipUnless(Path("/bin/bash").exists(), "requires a POSIX shell")
+    def test_all_provider_failures_are_recorded_in_status(self) -> None:
+        result, status, calls, fallback_called = self._run_wrapper(
+            failures_before_success=2,
+            fallback_succeeds=False,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(fallback_called)
+        self.assertEqual(status["article_status"], "failed")
+        self.assertEqual(status["article_generation_provider"], "failed")
+        self.assertEqual(status["article_codex_attempts"], 2)
+        self.assertTrue(status["article_fallback_started"])
+        self.assertTrue(status["article_codex_last_error"])
+
+    def _run_wrapper(
+        self,
+        *,
+        failures_before_success: int,
+        fallback_succeeds: bool = True,
+    ) -> tuple[subprocess.CompletedProcess[str], dict[str, object], list[list[str]], bool]:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             run_dir = root / "run"
@@ -245,7 +270,9 @@ class CodexArticleScriptTests(unittest.TestCase):
                 "#!/usr/bin/env bash\n"
                 "set -euo pipefail\n"
                 f"touch '{fallback_marker}'\n"
-                "printf '# Fallback\\n\\nOpenRouter article.\\n' > \"$1/roadmap-article.md\"\n",
+                "if [[ \"${FAKE_FALLBACK_FAIL:-0}\" == 1 ]]; then exit 1; fi\n"
+                "printf '# Fallback\\n\\n' > \"$1/roadmap-article.md\"\n"
+                "for _ in $(seq 1 40); do printf 'OpenRouter article. ' >> \"$1/roadmap-article.md\"; done\n",
                 encoding="utf-8",
             )
             fallback.chmod(0o755)
@@ -253,13 +280,20 @@ class CodexArticleScriptTests(unittest.TestCase):
             env = os.environ.copy()
             env.update({
                 "CODEX_BIN": str(fake_codex),
+                "CODEX_ARTICLE_HEDGE_RUNNER": str(ROOT / "scripts" / "run_codex_article_hedge.py"),
                 "CODEX_ARTICLE_PROMPT": str(prompt),
                 "ROADMAP_ENHANCEMENTS_PROMPT": str(enhancements),
                 "CODEX_ARTICLE_FALLBACK_SCRIPT": str(fallback),
-                "CODEX_ARTICLE_RETRY_DELAY_SECONDS": "0",
+                "CODEX_ARTICLE_HEDGE_DELAY_SECONDS": "0.3",
+                "CODEX_ARTICLE_FALLBACK_AFTER_SECONDS": "0.8",
+                "CODEX_ARTICLE_PRIMARY_TIMEOUT_SECONDS": "1.5",
+                "CODEX_ARTICLE_HEDGE_TIMEOUT_SECONDS": "0.5",
+                "CODEX_ARTICLE_FALLBACK_TIMEOUT_SECONDS": "1.0",
+                "CODEX_ARTICLE_POLL_INTERVAL_SECONDS": "0.005",
                 "ROADMAP_MARKDOWN_TO_HTML": "missing-roadmap-renderer",
                 "FAKE_CODEX_CALLS": str(calls_path),
                 "FAKE_CODEX_FAILURES_BEFORE_SUCCESS": str(failures_before_success),
+                "FAKE_FALLBACK_FAIL": "0" if fallback_succeeds else "1",
             })
             result = subprocess.run(
                 ["/bin/bash", str(ROOT / "scripts/generate_article_with_codex.sh"), str(run_dir)],
@@ -270,6 +304,210 @@ class CodexArticleScriptTests(unittest.TestCase):
             status = json.loads((run_dir / "status.json").read_text(encoding="utf-8"))
             calls = [json.loads(line) for line in calls_path.read_text(encoding="utf-8").splitlines()]
             return result, status, calls, fallback_marker.exists()
+
+
+@unittest.skipUnless(Path("/bin/bash").exists(), "requires a POSIX process model")
+class CodexHedgeRunnerTests(unittest.TestCase):
+    def run_scenario(
+        self,
+        plan: list[dict[str, object]],
+        *,
+        fallback_mode: str = "success",
+        fallback_delay: float = 0.01,
+        hedge_delay: float = 0.2,
+        fallback_after: float = 0.7,
+    ) -> tuple[subprocess.CompletedProcess[str], dict[str, object], str, list[dict[str, object]], list[int], int]:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "run"
+            run_dir.mkdir()
+            for name in ("transcript.md", "verification.md", "teacher-notes.md"):
+                (run_dir / name).write_text(name, encoding="utf-8")
+            (run_dir / "status.json").write_text("{}", encoding="utf-8")
+            prompt = run_dir / "prompt.md"
+            output = run_dir / "roadmap-article.md"
+            last_output = run_dir / "last.md"
+            result_path = run_dir / "result.json"
+            prompt.write_text("prompt", encoding="utf-8")
+
+            calls_path = root / "calls.json"
+            completions_path = root / "completions.json"
+            lock_path = root / "calls.lock"
+            fallback_calls = root / "fallback-calls.txt"
+            fake_codex = root / "codex"
+            fake_codex.write_text(
+                "#!/usr/bin/env python3\n"
+                "import fcntl, json, os, pathlib, sys, time\n"
+                "calls_path = pathlib.Path(os.environ['FAKE_CALLS'])\n"
+                "lock_path = pathlib.Path(os.environ['FAKE_LOCK'])\n"
+                "with lock_path.open('a') as lock:\n"
+                "    fcntl.flock(lock, fcntl.LOCK_EX)\n"
+                "    calls = json.loads(calls_path.read_text() or '[]') if calls_path.exists() else []\n"
+                "    index = len(calls) + 1\n"
+                "    calls.append({'index': index, 'pid': os.getpid()})\n"
+                "    calls_path.write_text(json.dumps(calls))\n"
+                "spec = json.loads(os.environ['FAKE_PLAN'])[index - 1]\n"
+                "time.sleep(float(spec.get('delay', 0)))\n"
+                "mode = spec.get('mode', 'success')\n"
+                "out = pathlib.Path(sys.argv[sys.argv.index('--output-last-message') + 1])\n"
+                "if mode == 'success':\n"
+                "    out.write_text(('# Winner %d\\n\\n' % index) + ('Useful article. ' * 40))\n"
+                "elif mode == 'invalid':\n"
+                "    out.write_text('short')\n"
+                "else:\n"
+                "    raise SystemExit(1)\n"
+                "with lock_path.open('a') as lock:\n"
+                "    fcntl.flock(lock, fcntl.LOCK_EX)\n"
+                "    done = json.loads(pathlib.Path(os.environ['FAKE_COMPLETIONS']).read_text() or '[]') if pathlib.Path(os.environ['FAKE_COMPLETIONS']).exists() else []\n"
+                "    done.append(index)\n"
+                "    pathlib.Path(os.environ['FAKE_COMPLETIONS']).write_text(json.dumps(done))\n",
+                encoding="utf-8",
+            )
+            fake_codex.chmod(0o755)
+
+            fake_fallback = root / "fallback"
+            fake_fallback.write_text(
+                "#!/usr/bin/env python3\n"
+                "import os, pathlib, sys, time\n"
+                "marker = pathlib.Path(os.environ['FAKE_FALLBACK_CALLS'])\n"
+                "marker.write_text(marker.read_text() + '1\\n' if marker.exists() else '1\\n')\n"
+                "time.sleep(float(os.environ.get('FAKE_FALLBACK_DELAY', '0.01')))\n"
+                "if os.environ.get('FAKE_FALLBACK_MODE') != 'success':\n"
+                "    raise SystemExit(1)\n"
+                "pathlib.Path(sys.argv[1], 'roadmap-article.md').write_text('# Fallback\\n\\n' + ('OpenRouter article. ' * 40))\n",
+                encoding="utf-8",
+            )
+            fake_fallback.chmod(0o755)
+
+            env = os.environ.copy()
+            env.update({
+                "FAKE_CALLS": str(calls_path),
+                "FAKE_COMPLETIONS": str(completions_path),
+                "FAKE_LOCK": str(lock_path),
+                "FAKE_PLAN": json.dumps(plan),
+                "FAKE_FALLBACK_CALLS": str(fallback_calls),
+                "FAKE_FALLBACK_MODE": fallback_mode,
+                "FAKE_FALLBACK_DELAY": str(fallback_delay),
+            })
+            command = [
+                sys.executable,
+                str(ROOT / "scripts" / "run_codex_article_hedge.py"),
+                str(run_dir),
+                "--prompt", str(prompt),
+                "--output", str(output),
+                "--last-output", str(last_output),
+                "--result", str(result_path),
+                "--codex-bin", str(fake_codex),
+                "--fallback-script", str(fake_fallback),
+                "--hedge-delay", str(hedge_delay),
+                "--fallback-after", str(fallback_after),
+                "--primary-timeout", "1.5",
+                "--hedge-timeout", "1.0",
+                "--fallback-timeout", "1.0",
+                "--poll-interval", "0.005",
+                "--minimum-bytes", "200",
+            ]
+            process = subprocess.run(command, capture_output=True, text=True, env=env, timeout=3)
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+            article = output.read_text(encoding="utf-8") if output.exists() else ""
+            calls = json.loads(calls_path.read_text(encoding="utf-8")) if calls_path.exists() else []
+            completions = json.loads(completions_path.read_text(encoding="utf-8")) if completions_path.exists() else []
+            fallback_count = len(fallback_calls.read_text().splitlines()) if fallback_calls.exists() else 0
+            for call in calls:
+                with self.assertRaises(ProcessLookupError):
+                    os.kill(int(call["pid"]), 0)
+            return process, result, article, calls, completions, fallback_count
+
+    def test_primary_finishes_before_hedge_is_started(self) -> None:
+        process, result, article, calls, completions, fallback_count = self.run_scenario([
+            {"delay": 0.01, "mode": "success"},
+        ])
+        self.assertEqual(process.returncode, 0, process.stderr)
+        self.assertEqual(result["winner"], "codex_primary")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(completions, [1])
+        self.assertEqual(fallback_count, 0)
+        self.assertIn("Winner 1", article)
+
+    def test_hedge_wins_and_primary_process_is_cancelled(self) -> None:
+        process, result, article, calls, completions, fallback_count = self.run_scenario([
+            {"delay": 1.0, "mode": "success"},
+            {"delay": 0.01, "mode": "success"},
+        ])
+        self.assertEqual(process.returncode, 0, process.stderr)
+        self.assertEqual(result["winner"], "codex_hedge")
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(completions, [2])
+        self.assertEqual(fallback_count, 0)
+        self.assertIn("Winner 2", article)
+
+    def test_primary_can_win_after_hedge_has_started(self) -> None:
+        process, result, article, calls, completions, fallback_count = self.run_scenario([
+            {"delay": 0.35, "mode": "success"},
+            {"delay": 0.5, "mode": "success"},
+        ])
+        self.assertEqual(process.returncode, 0, process.stderr)
+        self.assertEqual(result["winner"], "codex_primary")
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(completions, [1])
+        self.assertEqual(fallback_count, 0)
+        self.assertIn("Winner 1", article)
+
+    def test_invalid_hedge_cannot_win_and_fallback_is_used_once(self) -> None:
+        process, result, article, calls, _completions, fallback_count = self.run_scenario([
+            {"delay": 1.0, "mode": "success"},
+            {"delay": 0.01, "mode": "invalid"},
+        ])
+        self.assertEqual(process.returncode, 0, process.stderr)
+        self.assertEqual(result["winner"], "openrouter_fallback")
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(fallback_count, 1)
+        self.assertIn("Fallback", article)
+
+    def test_two_codex_failures_start_only_one_fallback(self) -> None:
+        process, result, article, calls, _completions, fallback_count = self.run_scenario([
+            {"delay": 0.01, "mode": "fail"},
+            {"delay": 0.01, "mode": "fail"},
+        ])
+        self.assertEqual(process.returncode, 0, process.stderr)
+        self.assertEqual(result["winner"], "openrouter_fallback")
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(fallback_count, 1)
+        self.assertIn("Fallback", article)
+
+    def test_all_workers_can_fail_without_leaving_an_article(self) -> None:
+        process, result, article, calls, _completions, fallback_count = self.run_scenario([
+            {"delay": 0.01, "mode": "fail"},
+            {"delay": 0.01, "mode": "fail"},
+        ], fallback_mode="fail")
+        self.assertNotEqual(process.returncode, 0)
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(fallback_count, 1)
+        self.assertEqual(article, "")
+
+    def test_primary_can_win_after_fallback_has_started(self) -> None:
+        process, result, article, calls, _completions, fallback_count = self.run_scenario([
+            {"delay": 0.6, "mode": "success"},
+            {"delay": 0.01, "mode": "invalid"},
+        ], fallback_delay=0.5, fallback_after=0.4)
+        self.assertEqual(process.returncode, 0, process.stderr)
+        self.assertEqual(result["winner"], "codex_primary")
+        self.assertTrue(result["fallback_started"])
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(fallback_count, 1)
+        self.assertIn("Winner 1", article)
+
+    def test_near_simultaneous_codex_results_commit_only_one_winner(self) -> None:
+        process, result, article, calls, _completions, fallback_count = self.run_scenario([
+            {"delay": 0.5, "mode": "success"},
+            {"delay": 0.3, "mode": "success"},
+        ], fallback_after=1.0)
+        self.assertEqual(process.returncode, 0, process.stderr)
+        self.assertIn(result["winner"], {"codex_primary", "codex_hedge"})
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(fallback_count, 0)
+        self.assertEqual(article.count("# Winner"), 1)
 
 
 class TelegramVoiceTranscriptionTests(unittest.TestCase):
