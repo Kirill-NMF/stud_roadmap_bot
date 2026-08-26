@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import subprocess
 import sys
 import time
@@ -16,6 +17,7 @@ DEFAULT_RUNS_DIR = "/var/lib/zoom-audio-pipeline/runs"
 DEFAULT_EVENTS_FILE = "/var/log/zoom-audio-pipeline/events.jsonl"
 DEFAULT_ARTICLE_SCRIPT = "/usr/local/bin/generate-article-with-gemini-rewrite"
 DEFAULT_NOTIFY_SCRIPT = "/usr/local/bin/telegram-roadmap-notify"
+DEFAULT_MARKDOWN_TO_HTML = "/usr/local/bin/roadmap-markdown-to-html"
 DEFAULT_RETRY_BASE_SECONDS = 120
 DEFAULT_RETRY_MAX_SECONDS = 1800
 
@@ -65,6 +67,81 @@ def notify_article_if_needed(
         notify_args = ["--chat-id", str(status["telegram_chat_id"]), *notify_args]
     notify(notify_script, notify_args)
     status["article_notified_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    save_json(status_path, status)
+
+
+def notify_validation_warning_if_needed(
+    status_path: Path,
+    status: dict[str, Any],
+    notify_script: str,
+    audio_name: str,
+) -> None:
+    warnings = status.get("article_validation_warnings") or []
+    if status.get("article_validation_status") != "warning" or not isinstance(warnings, list) or not warnings:
+        return
+    if status.get("article_validation_notified_at"):
+        return
+    lines = ["Проверка финальной статьи:", ""]
+    lines.extend(f"{index}. {warning}" for index, warning in enumerate(warnings, start=1))
+    lines.extend(["", f"Файл: {audio_name}"])
+    notify_args = ["--stage", "custom", "--text", "\n".join(lines)]
+    if status.get("telegram_chat_id"):
+        notify_args = ["--chat-id", str(status["telegram_chat_id"]), *notify_args]
+    notify(notify_script, notify_args)
+    status["article_validation_notified_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    save_json(status_path, status)
+
+
+def notify_article_recovery_if_needed(
+    status_path: Path,
+    status: dict[str, Any],
+    notify_script: str,
+    audio_name: str,
+    run_dir: Path,
+) -> None:
+    if status.get("article_recovery_notified_at"):
+        return
+    notify_args = ["--stage", "article_recovery", "--audio", audio_name, "--run-dir", str(run_dir)]
+    if status.get("telegram_chat_id"):
+        notify_args = ["--chat-id", str(status["telegram_chat_id"]), *notify_args]
+    notify(notify_script, notify_args)
+    status["article_recovery_notified_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    save_json(status_path, status)
+
+
+def finalize_gpt_draft(run_dir: Path, status_path: Path, markdown_to_html: str) -> None:
+    draft = run_dir / "roadmap-article-draft.md"
+    article = run_dir / "roadmap-article.md"
+    html = run_dir / "roadmap-article.html"
+    if not draft.is_file() or draft.stat().st_size == 0:
+        raise FileNotFoundError(f"GPT draft is missing: {draft}")
+    shutil.copyfile(draft, article)
+    subprocess.run([markdown_to_html, str(article), "-o", str(html)], check=True)
+    status = load_json(status_path)
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    status.update({
+        "article_status": "done",
+        "article_done_at": now,
+        "article_source": "gpt_draft",
+        "article": str(article),
+        "article_bytes": article.stat().st_size,
+        "html": str(html),
+        "html_bytes": html.stat().st_size if html.exists() else 0,
+        "article_retry_pending": False,
+        "gemini_rewrite_status": "bypassed_by_teacher",
+        "article_validation_status": "bypassed_by_teacher",
+        "article_validation_warnings": [],
+    })
+    for key in (
+        "article_recovery_status",
+        "article_recovery_reason",
+        "article_recovery_action",
+        "article_recovery_notified_at",
+        "article_next_retry_at",
+        "article_next_retry_at_epoch",
+        "gemini_force_retry",
+    ):
+        status.pop(key, None)
     save_json(status_path, status)
 
 
@@ -128,6 +205,7 @@ def main() -> int:
     parser.add_argument("--events-file", default=DEFAULT_EVENTS_FILE)
     parser.add_argument("--article-script", default=DEFAULT_ARTICLE_SCRIPT)
     parser.add_argument("--notify-script", default=DEFAULT_NOTIFY_SCRIPT)
+    parser.add_argument("--markdown-to-html", default=DEFAULT_MARKDOWN_TO_HTML)
     parser.add_argument("--retry-base-seconds", type=int, default=DEFAULT_RETRY_BASE_SECONDS)
     parser.add_argument("--retry-max-seconds", type=int, default=DEFAULT_RETRY_MAX_SECONDS)
     parser.add_argument("--force", action="store_true")
@@ -150,6 +228,36 @@ def main() -> int:
             continue
         if article_status == "done" and not args.force:
             notify_article_if_needed(status_path, status, args.notify_script, audio_name, run_dir)
+            status = load_json(status_path)
+            notify_validation_warning_if_needed(status_path, status, args.notify_script, audio_name)
+            continue
+        if status.get("article_recovery_action") == "use_gpt_draft":
+            try:
+                finalize_gpt_draft(run_dir, status_path, args.markdown_to_html)
+            except Exception as error:
+                status = load_json(status_path)
+                status["article_status"] = "recovery_required"
+                status["article_recovery_status"] = "awaiting_choice"
+                status["article_recovery_reason"] = "gpt_draft_finalize_failed"
+                save_json(status_path, status)
+                append_event(events_path, {
+                    "stage": "article_gpt_recovery_failed",
+                    "audio": audio_name,
+                    "run_dir": str(run_dir),
+                    "error": repr(error),
+                })
+                notify_article_recovery_if_needed(status_path, status, args.notify_script, audio_name, run_dir)
+                continue
+            status = load_json(status_path)
+            append_event(events_path, {
+                "stage": "article_gpt_recovery_done",
+                "audio": audio_name,
+                "run_dir": str(run_dir),
+            })
+            notify_article_if_needed(status_path, status, args.notify_script, audio_name, run_dir)
+            continue
+        if status.get("article_recovery_status") == "awaiting_choice" and not args.force:
+            notify_article_recovery_if_needed(status_path, status, args.notify_script, audio_name, run_dir)
             continue
         if article_status == "failed" and not args.force and not retry_is_due(status):
             print(f"article_retry_waiting: {audio_name} -> {status.get('article_next_retry_at', '')}")
@@ -164,6 +272,16 @@ def main() -> int:
             subprocess.run([args.article_script, str(run_dir)], check=True)
         except Exception as error:
             status = load_json(status_path)
+            if status.get("article_recovery_status") == "awaiting_choice":
+                append_event(events_path, {
+                    "stage": "article_recovery_required",
+                    "audio": audio_name,
+                    "run_dir": str(run_dir),
+                    "reason": status.get("article_recovery_reason", "validation_failed"),
+                })
+                notify_article_recovery_if_needed(status_path, status, args.notify_script, audio_name, run_dir)
+                print(f"article_recovery_required: {audio_name}")
+                continue
             attempt, delay = schedule_article_retry(
                 status_path,
                 status,
@@ -197,6 +315,8 @@ def main() -> int:
             "html": status.get("html", str(run_dir / "roadmap-article.html")),
         })
         notify_article_if_needed(status_path, status, args.notify_script, audio_name, run_dir)
+        status = load_json(status_path)
+        notify_validation_warning_if_needed(status_path, status, args.notify_script, audio_name)
         print(f"article_done: {audio_name} -> {status.get('article')}")
 
     return 0

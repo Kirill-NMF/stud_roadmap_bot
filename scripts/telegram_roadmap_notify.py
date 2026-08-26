@@ -581,7 +581,7 @@ def main() -> int:
     parser.add_argument("--parse-mode", default="")
     parser.add_argument(
         "--stage",
-        choices=["custom", "transcript_ready", "verification_ready", "article_ready"],
+        choices=["custom", "transcript_ready", "verification_ready", "article_ready", "article_recovery"],
         default="custom",
     )
     parser.add_argument("--audio", default="")
@@ -678,6 +678,23 @@ def main() -> int:
         article_pdf = ensure_article_pdf(run_dir)
         if public_url:
             reply_markup = {"inline_keyboard": [[{"text": "Открыть красиво", "web_app": {"url": public_url}}]]}
+
+    elif args.stage == "article_recovery":
+        if not args.audio or not args.run_dir:
+            print("--audio and --run-dir are required for article_recovery", file=sys.stderr)
+            return 2
+        key = register_run(Path(args.registry_file), args.run_dir, args.audio, str(chat_id))
+        text = "\n".join([
+            "Gemini вернул технически повреждённую версию статьи.",
+            "Выбери: повторить только рерайт через Gemini или получить сохранённую GPT-версию.",
+            f"Файл: {args.audio}",
+        ])
+        reply_markup = {
+            "inline_keyboard": [
+                [{"text": "Повторить через Gemini", "callback_data": f"roadmap:gemini_retry:{key}"}],
+                [{"text": "Получить GPT-версию", "callback_data": f"roadmap:gpt_version:{key}"}],
+            ]
+        }
 
     if not text:
         print("--text is required", file=sys.stderr)

@@ -7,6 +7,7 @@ import importlib.util
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -233,8 +234,9 @@ class GeminiRewriteScriptTests(unittest.TestCase):
         self.assertNotIn('"shorts",', script)
         self.assertNotIn('"reels",', script)
         self.assertNotIn('"foreign company",', script)
-        self.assertIn("heading mismatch", script)
-        self.assertIn("unexpected P-codes added", script)
+        self.assertIn("GEMINI_REWRITE_VALIDATOR", script)
+        self.assertIn("article_recovery_status=awaiting_choice", script)
+        self.assertIn("gemini_rewrite_reused=true", script)
         self.assertIn("article_source\"] = \"gemini_rewrite\"", script)
 
     def test_composite_script_reuses_current_draft_and_caps_rewrite_budget(self) -> None:
@@ -315,6 +317,7 @@ class OpenRouterRoadmapGeneratorTests(unittest.TestCase):
             "openrouter-roadmap-generate",
             "generate-verification-with-openrouter",
             "generate-article-with-openrouter",
+            "validate-gemini-rewrite",
             "roadmap-pipeline-doctor",
             "consultation_verification_prompt.md",
             "consultation_article_prompt.md",
@@ -966,6 +969,85 @@ class WebhookApprovalTests(TempRunMixin, unittest.TestCase):
         sent_messages = [payload for method, payload in self.sent if method == "sendMessage"]
         self.assertTrue(sent_messages)
         self.assertIn("Не нашёл этот запуск", sent_messages[-1]["text"])
+
+    def test_gemini_retry_callback_queues_only_gemini_stage(self) -> None:
+        (self.run_dir / "status.json").write_text(json.dumps({
+            "article_status": "recovery_required",
+            "article_recovery_status": "awaiting_choice",
+            "telegram_chat_id": "42",
+        }), encoding="utf-8")
+
+        self.handler().handle_callback({
+            "id": "cb-retry",
+            "data": "roadmap:gemini_retry:abc123",
+            "message": {"chat": {"id": 42}},
+        })
+
+        status = self.status()
+        self.assertEqual(status["article_status"], "recovery_requested")
+        self.assertEqual(status["article_recovery_action"], "retry_gemini")
+        self.assertTrue(status["gemini_force_retry"])
+        self.start_mock.assert_called_once()
+        sent_texts = [payload["text"] for method, payload in self.sent if method == "sendMessage"]
+        self.assertTrue(any("Принято в работу" in text for text in sent_texts))
+
+    def test_gpt_version_callback_queues_draft_without_duplicate_start(self) -> None:
+        (self.run_dir / "status.json").write_text(json.dumps({
+            "article_status": "recovery_required",
+            "article_recovery_status": "awaiting_choice",
+            "telegram_chat_id": "42",
+        }), encoding="utf-8")
+        callback = {
+            "id": "cb-gpt",
+            "data": "roadmap:gpt_version:abc123",
+            "message": {"chat": {"id": 42}},
+        }
+
+        self.handler().handle_callback(callback)
+        self.handler().handle_callback(callback)
+
+        status = self.status()
+        self.assertEqual(status["article_status"], "recovery_requested")
+        self.assertEqual(status["article_recovery_action"], "use_gpt_draft")
+        self.assertEqual(self.start_mock.call_count, 1)
+
+    def test_second_recovery_choice_cannot_replace_active_action(self) -> None:
+        (self.run_dir / "status.json").write_text(json.dumps({
+            "article_status": "recovery_required",
+            "article_recovery_status": "awaiting_choice",
+            "telegram_chat_id": "42",
+        }), encoding="utf-8")
+
+        self.handler().handle_callback({
+            "id": "cb-retry",
+            "data": "roadmap:gemini_retry:abc123",
+            "message": {"chat": {"id": 42}},
+        })
+        self.handler().handle_callback({
+            "id": "cb-gpt",
+            "data": "roadmap:gpt_version:abc123",
+            "message": {"chat": {"id": 42}},
+        })
+
+        status = self.status()
+        self.assertEqual(status["article_recovery_action"], "retry_gemini")
+        self.assertEqual(self.start_mock.call_count, 1)
+
+    def test_recovery_callback_rejects_another_chat(self) -> None:
+        (self.run_dir / "status.json").write_text(json.dumps({
+            "article_status": "recovery_required",
+            "article_recovery_status": "awaiting_choice",
+            "telegram_chat_id": "42",
+        }), encoding="utf-8")
+
+        self.handler().handle_callback({
+            "id": "cb-foreign",
+            "data": "roadmap:gpt_version:abc123",
+            "message": {"chat": {"id": 99}},
+        })
+
+        self.assertEqual(self.status()["article_status"], "recovery_required")
+        self.start_mock.assert_not_called()
 
     def test_text_approval_same_as_button(self) -> None:
         self.handler().handle_message({"chat": {"id": 42}, "text": "совсем согласен"})
@@ -1785,6 +1867,46 @@ class NotifyFormattingTests(unittest.TestCase):
         self.assertEqual([path.name for path, _name in sent_docs], ["roadmap-article.html", "roadmap-article.pdf"])
         self.assertEqual([name for _path, name in sent_docs], ["Настя а2 roadmap.html", "Настя а2 roadmap.pdf"])
 
+    def test_article_recovery_sends_two_choice_buttons(self) -> None:
+        sent: list[dict[str, object]] = []
+        registry = self.root / "recovery-registry.json"
+
+        def fake_telegram_request(
+            _token: str,
+            method: str,
+            payload: dict[str, object] | None = None,
+            **_kwargs: object,
+        ):
+            if method == "sendMessage" and payload:
+                sent.append(payload)
+            return {"ok": True, "result": {"message_id": 303}}
+
+        with patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "token"}, clear=False), \
+            patch.object(sys, "argv", [
+                "telegram_roadmap_notify.py",
+                "--chat-id",
+                "42",
+                "--stage",
+                "article_recovery",
+                "--audio",
+                "Дмитрий а1-.m4a",
+                "--run-dir",
+                str(self.run_dir),
+                "--registry-file",
+                str(registry),
+            ]), \
+            patch.object(NOTIFY, "telegram_request", side_effect=fake_telegram_request):
+            self.assertEqual(NOTIFY.main(), 0)
+
+        labels = [
+            button["text"]
+            for row in sent[-1]["reply_markup"]["inline_keyboard"]  # type: ignore[index]
+            for button in row
+        ]
+        self.assertEqual(labels, ["Повторить через Gemini", "Получить GPT-версию"])
+        saved = json.loads(registry.read_text(encoding="utf-8"))
+        self.assertEqual(len(saved["runs"]), 1)
+
 
 class ApprovedProcessorTests(unittest.TestCase):
     def test_corrupt_retry_state_is_due_and_backoff_is_bounded(self) -> None:
@@ -1812,6 +1934,71 @@ class ApprovedProcessorTests(unittest.TestCase):
             self.assertEqual(len(calls), 1)
             self.assertEqual(calls[0][:2], ["--chat-id", "42"])
             self.assertIn("article_notified_at", json.loads(status_path.read_text(encoding="utf-8")))
+
+    def test_validation_warning_is_sent_after_article_only_once(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            run_dir.mkdir()
+            status_path = run_dir / "status.json"
+            status = {
+                "article_status": "done",
+                "article_notified_at": "already-sent",
+                "article_validation_status": "warning",
+                "article_validation_warnings": ["Изменилось количество разделов статьи."],
+                "telegram_chat_id": "42",
+            }
+            status_path.write_text(json.dumps(status), encoding="utf-8")
+            calls: list[list[str]] = []
+
+            with patch.object(APPROVED, "notify", side_effect=lambda _script, args: calls.append(args)):
+                APPROVED.notify_validation_warning_if_needed(status_path, status, "notify", "lesson.m4a")
+                updated = json.loads(status_path.read_text(encoding="utf-8"))
+                APPROVED.notify_validation_warning_if_needed(status_path, updated, "notify", "lesson.m4a")
+
+            self.assertEqual(len(calls), 1)
+            self.assertIn("1. Изменилось количество разделов статьи.", calls[0][-1])
+
+    def test_validation_failure_waits_for_recovery_choice_without_timed_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "run"
+            run_dir.mkdir()
+            status_path = run_dir / "status.json"
+            (run_dir / "verification.md").write_text("verification", encoding="utf-8")
+            status_path.write_text(json.dumps({
+                "teacher_verification_decision": "approved_for_article",
+                "article_status": "started",
+                "audio_path": str(run_dir / "audio.m4a"),
+                "telegram_chat_id": "42",
+            }), encoding="utf-8")
+            notifications: list[list[str]] = []
+
+            def fail_validation(_command: list[str], check: bool) -> None:
+                status = json.loads(status_path.read_text(encoding="utf-8"))
+                status.update({
+                    "article_status": "recovery_required",
+                    "article_recovery_status": "awaiting_choice",
+                    "article_recovery_reason": "gemini_validation_failed",
+                })
+                status_path.write_text(json.dumps(status), encoding="utf-8")
+                raise APPROVED.subprocess.CalledProcessError(3, _command)
+
+            with patch.object(sys, "argv", [
+                "process_approved_roadmaps.py",
+                "--runs-dir",
+                str(root),
+                "--events-file",
+                str(root / "events.jsonl"),
+            ]), \
+                patch.object(APPROVED.subprocess, "run", side_effect=fail_validation), \
+                patch.object(APPROVED, "notify", side_effect=lambda _script, args: notifications.append(args)):
+                self.assertEqual(APPROVED.main(), 0)
+
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+            self.assertNotIn("article_next_retry_at_epoch", status)
+            self.assertIn("article_recovery_notified_at", status)
+            self.assertEqual(len(notifications), 1)
+            self.assertIn("article_recovery", notifications[0])
 
     def test_failed_article_schedules_retry_notifies_once_and_continues(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1892,6 +2079,83 @@ class ApprovedProcessorTests(unittest.TestCase):
                 self.assertEqual(APPROVED.main(), 0)
 
             run_mock.assert_not_called()
+
+    def test_gpt_recovery_finalizes_saved_draft(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            run_dir.mkdir()
+            draft = run_dir / "roadmap-article-draft.md"
+            draft.write_text("# GPT draft\n\nUseful article.\n", encoding="utf-8")
+            status_path = run_dir / "status.json"
+            status_path.write_text(json.dumps({
+                "article_status": "recovery_requested",
+                "article_recovery_action": "use_gpt_draft",
+            }), encoding="utf-8")
+
+            with patch.object(APPROVED.subprocess, "run") as render:
+                APPROVED.finalize_gpt_draft(run_dir, status_path, "renderer")
+
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+            self.assertEqual((run_dir / "roadmap-article.md").read_text(encoding="utf-8"), draft.read_text(encoding="utf-8"))
+            self.assertEqual(status["article_status"], "done")
+            self.assertEqual(status["article_source"], "gpt_draft")
+            self.assertEqual(status["gemini_rewrite_status"], "bypassed_by_teacher")
+            self.assertEqual(status["article_validation_status"], "bypassed_by_teacher")
+            self.assertNotIn("article_recovery_action", status)
+            render.assert_called_once()
+
+
+class GeminiRewriteValidatorTests(unittest.TestCase):
+    def run_validator(self, draft: str, final: str) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            draft_path = root / "draft.md"
+            final_path = root / "final.md"
+            report_path = root / "report.json"
+            draft_path.write_text(draft, encoding="utf-8")
+            final_path.write_text(final, encoding="utf-8")
+            result = subprocess.run([
+                sys.executable,
+                str(ROOT / "scripts" / "validate_gemini_rewrite.py"),
+                str(draft_path),
+                str(final_path),
+                "--report",
+                str(report_path),
+            ], capture_output=True, text=True)
+            report = json.loads(report_path.read_text(encoding="utf-8")) if report_path.exists() else {}
+            return result, report
+
+    def test_localized_heading_is_silent_and_usable(self) -> None:
+        draft = "# Дмитрий\n\n## Roadmap\n\n" + ("Полезный текст. " * 80)
+        final = "# Дмитрий\n\n## План действий\n\n" + ("Полезный текст. " * 80)
+        result, report = self.run_validator(draft, final)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(report["status"], "ok")
+        self.assertEqual(report["warnings"], [])
+
+    def test_missing_section_is_nonblocking_actionable_warning(self) -> None:
+        draft = "# Дмитрий\n\n## Сейчас\n\nТекст.\n\n## План\n\n" + ("Подробность. " * 80)
+        final = "# Дмитрий\n\n## Сейчас\n\n" + ("Подробность. " * 80)
+        result, report = self.run_validator(draft, final)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(report["status"], "warning")
+        self.assertTrue(report["warnings"])
+
+    def test_missing_numeric_condition_is_nonblocking_actionable_warning(self) -> None:
+        draft = "# Дмитрий\n\n## План\n\nЦена 3000 рублей, срок 6-9 месяцев.\n" + ("Подробность. " * 80)
+        final = "# Дмитрий\n\n## План действий\n\n" + ("Подробность. " * 80)
+        result, report = self.run_validator(draft, final)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(report["status"], "warning")
+        self.assertTrue(any("3000 рублей" in warning for warning in report["warnings"]))
+
+    def test_truncated_final_requires_recovery_choice(self) -> None:
+        draft = "# Дмитрий\n\n## План\n\n" + ("Подробный текст. " * 200)
+        final = "# Дмитрий\n\nОборвано."
+        result, report = self.run_validator(draft, final)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(report["status"], "recovery_required")
+        self.assertTrue(report["errors"])
 
 
 if __name__ == "__main__":

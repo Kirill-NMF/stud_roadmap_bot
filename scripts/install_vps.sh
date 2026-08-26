@@ -42,6 +42,7 @@ install -m 0755 "$ROOT_DIR/scripts/openrouter_roadmap_generate.py" "$BIN_DIR/ope
 install -m 0755 "$ROOT_DIR/scripts/generate_verification_with_openrouter.sh" "$BIN_DIR/generate-verification-with-openrouter"
 install -m 0755 "$ROOT_DIR/scripts/generate_article_with_openrouter.sh" "$BIN_DIR/generate-article-with-openrouter"
 install -m 0755 "$ROOT_DIR/scripts/generate_article_with_gemini_rewrite.sh" "$BIN_DIR/generate-article-with-gemini-rewrite"
+install -m 0755 "$ROOT_DIR/scripts/validate_gemini_rewrite.py" "$BIN_DIR/validate-gemini-rewrite"
 install -m 0755 "$ROOT_DIR/scripts/doctor_vps.sh" "$BIN_DIR/roadmap-pipeline-doctor"
 install -m 0755 "$ROOT_DIR/skills/english-roadmap-rewrite/scripts/openrouter_gemini_chat_chain.py" "$BIN_DIR/openrouter-gemini-chat-chain"
 install -m 0755 "$ROOT_DIR/skills/english-roadmap-rewrite/scripts/roadmap_markdown_to_html.py" "$BIN_DIR/roadmap-markdown-to-html"

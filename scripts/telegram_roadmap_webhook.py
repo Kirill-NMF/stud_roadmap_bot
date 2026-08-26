@@ -777,6 +777,51 @@ def mark_approved_and_start(
     return "Принято в работу. Генерирую статью-roadmap, пришлю HTML и PDF, когда всё будет готово."
 
 
+def queue_article_recovery(
+    run_dir: Path,
+    audio: str,
+    chat_id: int | str,
+    key: str,
+    action: str,
+    events_path: Path,
+) -> tuple[str, bool]:
+    status_path = run_dir / "status.json"
+    status = load_json(status_path, {})
+    action_map = {
+        "gemini_retry": ("retry_gemini", "Повторный рерайт через Gemini принят в работу."),
+        "gpt_version": ("use_gpt_draft", "GPT-версия принята в работу."),
+    }
+    recovery_action, reply = action_map[action]
+    if status.get("article_status") == "done":
+        return "Финальная версия уже готова и была передана на отправку.", False
+    if status.get("article_status") == "recovery_requested":
+        return "Это действие уже принято в работу.", False
+
+    status["article_status"] = "recovery_requested"
+    status["article_recovery_status"] = "requested"
+    status["article_recovery_action"] = recovery_action
+    status["telegram_callback_key"] = key
+    status["telegram_chat_id"] = str(chat_id)
+    status["article_recovery_requested_at"] = utc_now()
+    status.pop("article_recovery_notified_at", None)
+    status.pop("article_next_retry_at", None)
+    status.pop("article_next_retry_at_epoch", None)
+    status["article_retry_pending"] = False
+    if recovery_action == "retry_gemini":
+        status["gemini_force_retry"] = True
+    else:
+        status.pop("gemini_force_retry", None)
+    save_json(status_path, status)
+    append_event(events_path, {
+        "stage": "article_recovery_requested",
+        "audio": audio,
+        "run_dir": str(run_dir),
+        "action": recovery_action,
+    })
+    start_pipeline_async()
+    return "Принято в работу. " + reply, True
+
+
 def correction_text_from_message(config: dict[str, str], token: str, run_dir: Path, message: dict[str, Any]) -> tuple[str, str]:
     text = str(message.get("text", "")).strip()
     if text:
@@ -896,6 +941,38 @@ def make_handler(config: dict[str, str]):
             run_dir = Path(item["run_dir"])
             audio = item.get("audio", run_dir.name)
             status_path = run_dir / "status.json"
+            owner_chat_id = str(item.get("chat_id") or load_json(status_path, {}).get("telegram_chat_id") or "")
+            if not chat_id or not owner_chat_id or str(chat_id) != owner_chat_id:
+                if callback_id:
+                    safe_telegram_request(
+                        token,
+                        "answerCallbackQuery",
+                        {"callback_query_id": callback_id, "text": "Действие недоступно для этого чата"},
+                        api_base_url=api_base_url,
+                    )
+                return
+            if action in {"gemini_retry", "gpt_version"}:
+                reply, _started = queue_article_recovery(
+                    run_dir,
+                    audio,
+                    chat_id,
+                    key,
+                    action,
+                    events_file,
+                )
+                if callback_id:
+                    safe_telegram_request(
+                        token,
+                        "answerCallbackQuery",
+                        {"callback_query_id": callback_id, "text": reply[:190]},
+                        api_base_url=api_base_url,
+                    )
+                safe_telegram_request(token, "sendMessage", {
+                    "chat_id": chat_id,
+                    "text": "\n".join([reply, f"Файл: {audio}"]),
+                    "disable_web_page_preview": True,
+                }, api_base_url=api_base_url)
+                return
             decision_map = {
                 "approve": ("approved_for_article", "Принято в работу."),
             }
@@ -1086,6 +1163,7 @@ def make_handler(config: dict[str, str]):
             status["teacher_notes_updated_at"] = utc_now()
             status["teacher_verification_decision_at"] = utc_now()
             status["telegram_chat_id"] = str(chat_id)
+            status["telegram_callback_key"] = key
             if source == "voice":
                 status["teacher_voice_transcription_provider"] = config.get("voice_provider", DEFAULT_VOICE_PROVIDER)
                 status["teacher_voice_transcription_model"] = config.get(
