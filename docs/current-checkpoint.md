@@ -108,7 +108,27 @@ source: telegram
 & 'C:\Users\bests\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' scripts\roadmap_pipeline_tests.py
 ```
 
-Latest known local result: `85/85 OK` on Windows (`2` POSIX-only wrapper tests skipped) and `85/85 OK` on the VPS.
+Latest known local result: `89/89 OK` on Windows (`2` POSIX-only wrapper tests skipped) and `89/89 OK` on the VPS.
+
+Latest deployed Telegram repeat-intake behavior (2026-08-26):
+
+- Commit `366736b` is deployed on the VPS.
+- A deliberate resend or forward of the same Telegram audio/document is a new
+  intake because its identity is now `chat_id + message_id`, not
+  `file_unique_id`.
+- A technical replay of the same Telegram message remains idempotent and does
+  not create a second pipeline run.
+- Existing legacy `telegram:<file_unique_id>` registry entries remain valid but
+  do not block a newly sent or forwarded message.
+- Repeated files receive unique local/inbox paths and distinct process keys, so
+  downstream transcription creates a separate run.
+- `file_unique_id`, `message_id`, and the message key remain available as intake
+  metadata for diagnostics and Notion archiving.
+- VPS gates passed: full `89/89` suite, focused 8-case Telegram fake smoke,
+  runtime/source hash match, public webhook health, and
+  `roadmap-pipeline-doctor`.
+- Production backup before this deployment:
+  `/var/backups/zoom-audio-pipeline/366736b-pre`.
 
 Latest deployed article routing (2026-08-26):
 
