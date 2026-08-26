@@ -108,7 +108,26 @@ source: telegram
 & 'C:\Users\bests\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' scripts\roadmap_pipeline_tests.py
 ```
 
-Latest known local result: `81/81 OK`.
+Latest known local result: `85/85 OK` on Windows (`2` POSIX-only wrapper tests skipped) and `85/85 OK` on the VPS.
+
+Latest deployed article routing (2026-08-26):
+
+- Commit `3f59bc6` is deployed on the VPS.
+- GPT roadmap drafts use Codex CLI with `gpt-5.6-terra` and reasoning effort
+  `high` through the VPS ChatGPT login.
+- Codex CLI receives the article prompt over stdin and writes each attempt to a
+  temporary file, so failed attempts cannot replace the current article.
+- Technical Codex failures retry up to three times. After the third failed
+  attempt, generation falls back once to the existing OpenRouter GPT wrapper.
+- `status.json` records the effective provider, model, reasoning effort, Codex
+  attempt count, fallback reason, duration, and output paths.
+- The article prompt shortens only the `Roadmap` table by about 60%; other
+  article sections and verified facts remain outside that reduction rule.
+- Production backup before this deployment:
+  `/var/backups/zoom-audio-pipeline/3f59bc6-pre`.
+- VPS gates passed: shell syntax, full `85/85` suite,
+  `roadmap-pipeline-doctor`, source/runtime hash match, Codex login status, and a
+  small real `gpt-5.6-terra` high-reasoning model probe.
 
 Latest deployed recovery (2026-08-26):
 
