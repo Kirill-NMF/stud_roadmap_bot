@@ -1238,7 +1238,7 @@ def make_handler(config: dict[str, str]):
                     if message.get("voice") or message.get("audio") or message.get("document"):
                         safe_telegram_request(token, "sendMessage", {
                             "chat_id": chat_id,
-                            "text": "Голосовое получил. Расшифровываю правки к выбранным абзацам.",
+                            "text": "Голосовое получил. Расшифровываю правки к выбранным блокам.",
                             "disable_web_page_preview": True,
                         }, api_base_url=api_base_url)
                     text, source = correction_text_from_message(
@@ -1250,7 +1250,7 @@ def make_handler(config: dict[str, str]):
                     if not text or (text.startswith("/") and source == "text"):
                         safe_telegram_request(token, "sendMessage", {
                             "chat_id": chat_id,
-                            "text": "Не смог получить текст правки. Выбор абзацев сохранён, пришли сообщение ещё раз.",
+                            "text": "Не смог получить текст правки. Выбор блоков сохранён, пришли сообщение ещё раз.",
                             "disable_web_page_preview": True,
                         }, api_base_url=api_base_url)
                         return
@@ -1277,7 +1277,7 @@ def make_handler(config: dict[str, str]):
                     safe_telegram_request(token, "sendMessage", {
                         "chat_id": chat_id,
                         "text": (
-                            "Правки к выбранным абзацам приняты. Gemini Pro обновляет статью; "
+                            "Правки к выбранным блокам приняты. Gemini Pro обновляет статью; "
                             "пришлю новые HTML и PDF, когда всё будет готово."
                         ),
                         "disable_web_page_preview": True,

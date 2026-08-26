@@ -19,7 +19,8 @@ from typing import Any, Callable
 
 
 ALLOWED_ACTIONS = {"keep", "replace", "delete"}
-BLOCK_LINE_RE = re.compile(r"^(?:#{1,6}\s|[-*+]\s|\d+[.)]\s|>|\||```)")
+HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
+LEGACY_BLOCK_LINE_RE = re.compile(r"^(?:#{1,6}\s|[-*+]\s|\d+[.)]\s|>|\||```)")
 HTML_TAG_RE = re.compile(r"<\s*/?\s*[a-zA-Z][^>]*>")
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_MODEL = "google/gemini-2.5-pro"
@@ -30,31 +31,46 @@ def source_hash(markdown: str) -> str:
     return hashlib.sha256(markdown.encode("utf-8")).hexdigest()
 
 
-def paragraph_spans(markdown: str) -> list[dict[str, Any]]:
+def section_spans(markdown: str) -> list[dict[str, Any]]:
     lines = markdown.splitlines()
+    headings: list[tuple[int, int, str, str]] = []
+    for index, line in enumerate(lines):
+        match = HEADING_RE.match(line.strip())
+        if match and len(match.group(1)) <= 2:
+            headings.append((index, len(match.group(1)), match.group(2).strip(), line.strip()))
+
+    if not headings:
+        text = markdown.strip()
+        return ([{
+            "start_line": 0,
+            "end_line": len(lines),
+            "heading": "Вступление",
+            "heading_level": 0,
+            "heading_markdown": "",
+            "text": text,
+        }] if text else [])
+
     spans: list[dict[str, Any]] = []
-    index = 0
-    while index < len(lines):
-        stripped = lines[index].strip()
-        if not stripped or BLOCK_LINE_RE.match(stripped):
-            index += 1
-            continue
-        start = index
-        parts: list[str] = []
-        while index < len(lines):
-            candidate = lines[index].strip()
-            if not candidate or BLOCK_LINE_RE.match(candidate):
-                break
-            parts.append(candidate)
-            index += 1
-        if parts:
-            spans.append({
-                "start_line": start,
-                "end_line": index,
-                "text": " ".join(parts),
-            })
-        if index == start:
-            index += 1
+    first_start = headings[0][0]
+    if any(line.strip() for line in lines[:first_start]):
+        spans.append({
+            "start_line": 0,
+            "end_line": first_start,
+            "heading": "Вступление",
+            "heading_level": 0,
+            "heading_markdown": "",
+            "text": "\n".join(lines[:first_start]).strip(),
+        })
+    for position, (start, level, heading, heading_markdown) in enumerate(headings):
+        end = headings[position + 1][0] if position + 1 < len(headings) else len(lines)
+        spans.append({
+            "start_line": start,
+            "end_line": end,
+            "heading": heading,
+            "heading_level": level,
+            "heading_markdown": heading_markdown,
+            "text": "\n".join(lines[start:end]).strip(),
+        })
     return spans
 
 
@@ -62,38 +78,60 @@ def build_manifest(markdown: str, previous: dict[str, Any] | None = None) -> dic
     digest = source_hash(markdown)
     previous_version = int((previous or {}).get("article_version") or 0)
     previous_hash = str((previous or {}).get("source_sha256") or "")
-    version = previous_version if previous_version and previous_hash == digest else previous_version + 1
+    same_schema = int((previous or {}).get("schema_version") or 0) == 2
+    version = previous_version if previous_version and previous_hash == digest and same_schema else previous_version + 1
     blocks = []
-    for number, span in enumerate(paragraph_spans(markdown), start=1):
+    for number, span in enumerate(section_spans(markdown), start=1):
         blocks.append({
-            "id": f"p_{number:03d}",
+            "id": f"b_{number:03d}",
             "number": number,
-            "type": "paragraph",
+            "type": "section",
             **span,
         })
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "article_version": max(1, version),
         "source_sha256": digest,
         "blocks": blocks,
     }
 
 
-def validate_replacement(value: Any) -> str:
+def validate_replacement(value: Any, block: dict[str, Any]) -> str:
     if not isinstance(value, str):
         raise ValueError("replacement must be a string")
     replacement = value.strip()
     if not replacement:
         raise ValueError("replacement must not be empty")
-    if len(replacement) > 12_000:
+    if len(replacement) > 50_000:
         raise ValueError("replacement is too long")
-    if "\n\n" in replacement or "\r\n\r\n" in replacement:
-        raise ValueError("replacement must remain one paragraph")
-    if any(BLOCK_LINE_RE.match(line.strip()) for line in replacement.splitlines() if line.strip()):
-        raise ValueError("replacement cannot add Markdown blocks")
     if HTML_TAG_RE.search(replacement):
         raise ValueError("replacement cannot contain HTML")
-    return " ".join(line.strip() for line in replacement.splitlines() if line.strip())
+    if block.get("type") == "paragraph":
+        if "\n\n" in replacement or "\r\n\r\n" in replacement:
+            raise ValueError("legacy replacement must remain one paragraph")
+        if any(
+            LEGACY_BLOCK_LINE_RE.match(line.strip())
+            for line in replacement.splitlines()
+            if line.strip()
+        ):
+            raise ValueError("legacy replacement cannot add Markdown blocks")
+        return " ".join(line.strip() for line in replacement.splitlines() if line.strip())
+    lines = replacement.splitlines()
+    heading_level = int(block.get("heading_level") or 0)
+    heading_markdown = str(block.get("heading_markdown") or "")
+    if heading_level:
+        if not lines or lines[0].strip() != heading_markdown:
+            raise ValueError("replacement must preserve the block heading")
+        for line in lines[1:]:
+            match = HEADING_RE.match(line.strip())
+            if match and len(match.group(1)) <= heading_level:
+                raise ValueError("replacement cannot add a sibling block")
+    elif any(
+        (match := HEADING_RE.match(line.strip())) and len(match.group(1)) <= 2
+        for line in lines
+    ):
+        raise ValueError("intro replacement cannot add a sibling block")
+    return replacement
 
 
 def validate_patch(
@@ -109,7 +147,12 @@ def validate_patch(
     operations = patch_value.get("operations")
     if not isinstance(blocks, list) or not isinstance(operations, list):
         raise ValueError("patch operations must be an array")
-    known_ids = {str(block.get("id")) for block in blocks if isinstance(block, dict)}
+    blocks_by_id = {
+        str(block.get("id")): block
+        for block in blocks
+        if isinstance(block, dict) and block.get("id")
+    }
+    known_ids = set(blocks_by_id)
     selected = [str(value) for value in selected_block_ids]
     if not selected or len(selected) != len(set(selected)) or not set(selected).issubset(known_ids):
         raise ValueError("selected block set is invalid")
@@ -127,7 +170,7 @@ def validate_patch(
             raise ValueError("operation action is invalid")
         replacement = raw.get("replacement")
         if action == "replace":
-            replacement = validate_replacement(replacement)
+            replacement = validate_replacement(replacement, blocks_by_id[block_id])
         elif replacement not in ("", None):
             raise ValueError("replacement must be empty for keep/delete")
         else:
@@ -162,7 +205,13 @@ def apply_validated_patch(
         operation = operations[block_id]
         if operation["action"] == "keep":
             continue
-        replacement_lines = [] if operation["action"] == "delete" else [operation["replacement"]]
+        replacement_lines = (
+            []
+            if operation["action"] == "delete"
+            else operation["replacement"].splitlines()
+        )
+        if replacement_lines and int(block["end_line"]) < len(lines):
+            replacement_lines.append("")
         lines[int(block["start_line"]):int(block["end_line"])] = replacement_lines
     result = "\n".join(lines).strip() + "\n"
     return re.sub(r"\n{3,}", "\n\n", result)
@@ -201,7 +250,13 @@ def build_gemini_payload(
 ) -> dict[str, Any]:
     blocks = {str(item["id"]): item for item in manifest["blocks"]}
     selected = [
-        {"block_id": block_id, "number": blocks[block_id]["number"], "original_text": blocks[block_id]["text"]}
+        {
+            "block_id": block_id,
+            "number": blocks[block_id]["number"],
+            "type": blocks[block_id].get("type", "section"),
+            "heading": blocks[block_id].get("heading", ""),
+            "original_markdown": blocks[block_id]["text"],
+        }
         for block_id in selected_block_ids
         if block_id in blocks
     ]
@@ -209,7 +264,7 @@ def build_gemini_payload(
 
 Полная статья ниже является контекстом и эталоном стиля. Сохраняй обращение к ученику, спокойный поддерживающий тон, естественную русскую лексику, длину и ритм предложений, терминологию и степень формальности.
 
-Изменять разрешено только перечисленные выбранные блоки. Для каждого выбранного block_id верни ровно одну операцию: keep, replace или delete. Не меняй порядок. Не добавляй факты, сроки, уровни, числа, обещания или договорённости, если голосовая инструкция прямо этого не требует. Делай минимально необходимое изменение. replacement должен оставаться одним абзацем без заголовков, таблиц, списков и HTML. Для keep/delete replacement должен быть пустой строкой.
+Изменять разрешено только перечисленные выбранные блоки. Для каждого выбранного block_id верни ровно одну операцию: keep, replace или delete. Не меняй порядок. Не добавляй факты, сроки, уровни, числа, обещания или договорённости, если голосовая инструкция прямо этого не требует. Делай минимально необходимое изменение. Для блока type=section верни в replacement полный Markdown раздела вместе с исходным заголовком, сохранив его дословно. Внутри section можно сохранять и менять абзацы, списки, таблицы и вложенные подзаголовки; не добавляй соседние разделы уровня # или ##. Для переходного блока type=paragraph replacement должен оставаться одним абзацем. Не используй HTML. Для keep/delete replacement должен быть пустой строкой.
 
 Версия статьи: {manifest['article_version']}
 
@@ -501,8 +556,8 @@ def notify_edit_failure(
         "--env-file", env.get("PIPELINE_ENV_FILE", "/etc/zoom-audio-pipeline/pipeline.env"),
         "--chat-id", str(job["chat_id"]),
         "--text", (
-            "Не смог применить правки к выбранным абзацам автоматически. "
-            "Текущая версия статьи сохранена. Открой её, выбери абзацы и попробуй ещё раз."
+            "Не смог применить правки к выбранным блокам автоматически. "
+            "Текущая версия статьи сохранена. Открой её, выбери блоки и попробуй ещё раз."
         ),
     ], check=False)
 

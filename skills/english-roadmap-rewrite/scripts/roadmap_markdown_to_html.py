@@ -121,15 +121,22 @@ tr:nth-child(even) td {
   color: var(--muted);
 }
 
-.edit-row {
+"""
+
+EDITOR_CSS = r"""
+.edit-block {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 44px;
   gap: 12px;
   align-items: start;
 }
 
-.edit-row > p {
+.edit-block-content {
   min-width: 0;
+}
+
+.edit-block + .edit-block {
+  margin-top: 8px;
 }
 
 .edit-choice {
@@ -170,6 +177,15 @@ tr:nth-child(even) td {
   box-shadow: 0 6px 18px rgba(32, 33, 36, 0.08);
 }
 
+@media (max-width: 640px) {
+  .edit-block {
+    grid-template-columns: minmax(0, 1fr) 36px;
+    gap: 8px;
+  }
+}
+"""
+
+CSS += r"""
 @media (max-width: 640px) {
   .page {
     padding: 0;
@@ -236,43 +252,64 @@ def render_table(lines: list[str]) -> str:
 
 
 def markdown_to_body(markdown: str, editor: dict[str, object] | None = None) -> tuple[str, str]:
+    if editor:
+        title, _ = markdown_to_body(markdown)
+        lines = markdown.splitlines()
+        raw_blocks = editor.get("blocks", [])
+        blocks = sorted(
+            (
+                block for block in raw_blocks
+                if isinstance(block, dict)
+                and isinstance(block.get("start_line"), int)
+                and isinstance(block.get("end_line"), int)
+            ),
+            key=lambda block: int(block["start_line"]),
+        )
+        output: list[str] = []
+        cursor = 0
+        for block in blocks:
+            start = int(block["start_line"])
+            end = int(block["end_line"])
+            if start < cursor or end <= start or end > len(lines):
+                continue
+            if start > cursor:
+                _, gap_html = markdown_to_body("\n".join(lines[cursor:start]))
+                if gap_html:
+                    output.append(gap_html)
+            _, block_html = markdown_to_body("\n".join(lines[start:end]))
+            block_id = html.escape(str(block["id"]), quote=True)
+            number = html.escape(str(block["number"]), quote=True)
+            output.extend([
+                f'<section class="edit-block" data-block-id="{block_id}">',
+                f'<div class="edit-block-content">{block_html}</div>',
+                f'<label class="edit-choice" title="Выбрать блок {number}">',
+                f'<input type="checkbox" value="{block_id}" aria-label="Выбрать блок {number}">',
+                f'<span class="edit-number">{number}</span>',
+                "</label>",
+                "</section>",
+            ])
+            cursor = end
+        if cursor < len(lines):
+            _, tail_html = markdown_to_body("\n".join(lines[cursor:]))
+            if tail_html:
+                output.append(tail_html)
+        return title, "\n".join(output)
+
     lines = markdown.splitlines()
     title = "Roadmap"
     output: list[str] = []
     paragraph: list[str] = []
-    paragraph_start = -1
     list_items: list[str] = []
     i = 0
 
     def flush_paragraph() -> None:
-        nonlocal paragraph, paragraph_start
+        nonlocal paragraph
         if paragraph:
             text = " ".join(part.strip() for part in paragraph if part.strip())
             cls = ' class="lead"' if not output and not text.startswith("<") else ""
             paragraph_html = f"<p{cls}>{inline_markdown(text)}</p>"
-            editor_blocks = editor.get("blocks", []) if editor else []
-            block = next((
-                item for item in editor_blocks
-                if isinstance(item, dict)
-                and item.get("start_line") == paragraph_start
-                and item.get("end_line") == i
-            ), None)
-            if block:
-                block_id = html.escape(str(block["id"]), quote=True)
-                number = html.escape(str(block["number"]), quote=True)
-                output.extend([
-                    f'<div class="edit-row" data-block-id="{block_id}">',
-                    paragraph_html,
-                    f'<label class="edit-choice" title="Выбрать абзац {number}">',
-                    f'<input type="checkbox" value="{block_id}" aria-label="Выбрать абзац {number}">',
-                    f'<span class="edit-number">{number}</span>',
-                    "</label>",
-                    "</div>",
-                ])
-            else:
-                output.append(paragraph_html)
+            output.append(paragraph_html)
             paragraph = []
-            paragraph_start = -1
 
     def flush_list() -> None:
         nonlocal list_items
@@ -330,8 +367,6 @@ def markdown_to_body(markdown: str, editor: dict[str, object] | None = None) -> 
             title = re.sub(r"\*\*(.+?)\*\*", r"\1", stripped)
             output.append(f"<h1>{inline_markdown(stripped)}</h1>")
         else:
-            if not paragraph:
-                paragraph_start = i
             paragraph.append(stripped)
         i += 1
 
@@ -349,7 +384,7 @@ def editor_script(editor: dict[str, object] | None) -> str:
         "api_url": str(editor.get("api_url", "/roadmap-telegram/article-selection")),
     }, ensure_ascii=False).replace("<", "\\u003c")
     return f"""
-    <p class="edit-status" id="edit-status" role="status">Отметь абзацы и пришли правки голосом в боте.</p>
+    <p class="edit-status" id="edit-status" role="status">Отметь блоки и пришли правки голосом в боте.</p>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <script>
     (() => {{
@@ -384,13 +419,13 @@ def editor_script(editor: dict[str, object] | None) -> str:
           inputs.forEach((input) => {{ input.checked = saved.has(input.value); }});
         }}
         const count = selectedIds().length;
-        setStatus(count ? `Выбрано: ${{count}}. Пришли правки голосом в боте.` : "Отметь абзацы и пришли правки голосом в боте.");
+        setStatus(count ? `Выбрано блоков: ${{count}}. Пришли правки голосом в боте.` : "Отметь блоки и пришли правки голосом в боте.");
       }};
       inputs.forEach((input) => input.addEventListener("change", () => {{
         setStatus("Сохраняю выбор...");
         request("set").catch(() => setStatus("Не удалось сохранить выбор. Открой статью из Telegram и попробуй ещё раз."));
       }}));
-      request("get").catch(() => setStatus("Открой статью из Telegram, чтобы выбрать абзацы."));
+      request("get").catch(() => setStatus("Открой статью из Telegram, чтобы выбрать блоки."));
     }})();
     </script>
 """
@@ -406,6 +441,7 @@ def render_html(markdown: str, editor: dict[str, object] | None = None) -> str:
   <title>{html.escape(title)}</title>
   <style>
 {CSS}
+{EDITOR_CSS if editor else ""}
   </style>
 </head>
 <body>

@@ -186,15 +186,112 @@ class ArticleEditingContractTests(unittest.TestCase):
 | 3 месяца | A2 |
 """
 
-    def test_manifest_numbers_only_editable_paragraphs_in_article_order(self) -> None:
+    SECTION_ARTICLE = """# Путь к английскому
+
+Короткое вступление для ученика.
+
+## Текущая точка
+
+Сейчас уровень A1.
+
+### Что уже получается
+
+- Поддерживать простой диалог.
+
+## Roadmap
+
+| Срок | Результат |
+| --- | --- |
+| 3 месяца | A2 |
+| 6 месяцев | B1 |
+"""
+
+    def test_manifest_and_editor_select_heading_blocks_including_roadmap(self) -> None:
+        manifest = ARTICLE_EDITOR.build_manifest(self.SECTION_ARTICLE)
+        self.assertEqual(manifest["schema_version"], 2)
+        self.assertEqual(
+            [(block["id"], block["number"], block["heading"]) for block in manifest["blocks"]],
+            [
+                ("b_001", 1, "Путь к английскому"),
+                ("b_002", 2, "Текущая точка"),
+                ("b_003", 3, "Roadmap"),
+            ],
+        )
+        roadmap = manifest["blocks"][2]
+        self.assertIn("| 6 месяцев | B1 |", roadmap["text"])
+
+        editable = ARTICLE_RENDERER.render_html(
+            self.SECTION_ARTICLE,
+            editor={
+                "run_key": "run123",
+                "article_version": 1,
+                "api_url": "/roadmap-telegram/article-selection",
+                "blocks": manifest["blocks"],
+            },
+        )
+        self.assertEqual(editable.count('class="edit-choice"'), 3)
+        self.assertIn('data-block-id="b_003"', editable)
+        self.assertIn('class="edit-number">3<', editable)
+        self.assertIn("6 месяцев", editable)
+
+        student_html = ARTICLE_RENDERER.render_html(self.SECTION_ARTICLE)
+        self.assertNotIn("edit-choice", student_html)
+        self.assertNotIn("edit-number", student_html)
+        self.assertNotIn("data-block-id", student_html)
+
+    def test_legacy_paragraph_manifest_remains_editable_during_schema_transition(self) -> None:
+        article = "# Roadmap\n\nСтарый абзац.\n"
+        legacy_manifest = {
+            "schema_version": 1,
+            "article_version": 4,
+            "source_sha256": ARTICLE_EDITOR.source_hash(article),
+            "blocks": [{
+                "id": "p_001",
+                "number": 1,
+                "type": "paragraph",
+                "start_line": 2,
+                "end_line": 3,
+                "text": "Старый абзац.",
+            }],
+        }
+        payload = ARTICLE_EDITOR.build_gemini_payload(
+            article,
+            legacy_manifest,
+            ["p_001"],
+            "Сделай короче.",
+            "google/gemini-2.5-pro",
+        )
+        self.assertIn("p_001", payload["messages"][0]["content"])
+        updated = ARTICLE_EDITOR.apply_validated_patch(
+            article,
+            legacy_manifest,
+            ["p_001"],
+            {
+                "article_version": 4,
+                "operations": [{
+                    "block_id": "p_001",
+                    "action": "replace",
+                    "replacement": "Короткий абзац.",
+                }],
+            },
+        )
+        self.assertIn("Короткий абзац.", updated)
+
+    def test_manifest_numbers_editable_sections_in_article_order(self) -> None:
         manifest = ARTICLE_EDITOR.build_manifest(self.ARTICLE)
         self.assertEqual(manifest["article_version"], 1)
         self.assertEqual(
             [(block["id"], block["number"], block["text"]) for block in manifest["blocks"]],
             [
-                ("p_001", 1, "Вступление в спокойном поддерживающем тоне."),
-                ("p_002", 2, "Первый содержательный абзац с уровнем A1."),
-                ("p_003", 3, "Второй содержательный абзац про два занятия в неделю."),
+                ("b_001", 1, "# Roadmap\n\nВступление в спокойном поддерживающем тоне."),
+                (
+                    "b_002",
+                    2,
+                    "## Текущая точка\n\nПервый содержательный абзац с уровнем A1.\n\n"
+                    "Второй содержательный абзац про два занятия в неделю.\n\n"
+                    "- Пункт списка остаётся неизменным.\n\n"
+                    "| Срок | Результат |\n| --- | --- |\n| 3 месяца | A2 |",
+                ),
             ],
         )
 
@@ -203,15 +300,20 @@ class ArticleEditingContractTests(unittest.TestCase):
         updated = ARTICLE_EDITOR.apply_validated_patch(
             self.ARTICLE,
             manifest,
-            ["p_002", "p_003"],
+            ["b_002"],
             {
                 "article_version": 1,
                 "operations": [
-                    {"block_id": "p_002", "action": "keep", "replacement": ""},
                     {
-                        "block_id": "p_003",
+                        "block_id": "b_002",
                         "action": "replace",
-                        "replacement": "Второй абзац стал короче, но сохранил стиль.",
+                        "replacement": (
+                            "## Текущая точка\n\n"
+                            "Первый содержательный абзац с уровнем A1.\n\n"
+                            "Второй абзац стал короче, но сохранил стиль.\n\n"
+                            "- Пункт списка остаётся неизменным.\n\n"
+                            "| Срок | Результат |\n| --- | --- |\n| 3 месяца | A2 |"
+                        ),
                     },
                 ],
             },
@@ -227,50 +329,54 @@ class ArticleEditingContractTests(unittest.TestCase):
         updated = ARTICLE_EDITOR.apply_validated_patch(
             self.ARTICLE,
             manifest,
-            ["p_002"],
+            ["b_002"],
             {
                 "article_version": 1,
-                "operations": [{"block_id": "p_002", "action": "delete", "replacement": ""}],
+                "operations": [{"block_id": "b_002", "action": "delete", "replacement": ""}],
             },
         )
         next_manifest = ARTICLE_EDITOR.build_manifest(updated, previous=manifest)
         self.assertEqual(next_manifest["article_version"], 2)
-        self.assertEqual([block["number"] for block in next_manifest["blocks"]], [1, 2])
-        self.assertEqual([block["id"] for block in next_manifest["blocks"]], ["p_001", "p_002"])
+        self.assertEqual([block["number"] for block in next_manifest["blocks"]], [1])
+        self.assertEqual([block["id"] for block in next_manifest["blocks"]], ["b_001"])
 
     def test_patch_requires_exact_selected_set_and_current_version(self) -> None:
         manifest = ARTICLE_EDITOR.build_manifest(self.ARTICLE)
         with self.assertRaisesRegex(ValueError, "selected block set"):
             ARTICLE_EDITOR.validate_patch(
                 manifest,
-                ["p_002", "p_003"],
+                ["b_001", "b_002"],
                 {
                     "article_version": 1,
-                    "operations": [{"block_id": "p_002", "action": "keep", "replacement": ""}],
+                    "operations": [{"block_id": "b_001", "action": "keep", "replacement": ""}],
                 },
             )
         with self.assertRaisesRegex(ValueError, "article version"):
             ARTICLE_EDITOR.validate_patch(
                 manifest,
-                ["p_002"],
+                ["b_002"],
                 {
                     "article_version": 2,
-                    "operations": [{"block_id": "p_002", "action": "keep", "replacement": ""}],
+                    "operations": [{"block_id": "b_002", "action": "keep", "replacement": ""}],
                 },
             )
 
     def test_replacement_cannot_inject_new_markdown_blocks_or_html(self) -> None:
         manifest = ARTICLE_EDITOR.build_manifest(self.ARTICLE)
-        for replacement in ("Новый абзац.\n\n## Чужой раздел", "<script>alert(1)</script>"):
+        for replacement in (
+            "Новый текст без исходного заголовка.",
+            "## Текущая точка\n\nТекст.\n\n## Чужой раздел",
+            "## Текущая точка\n\n<script>alert(1)</script>",
+        ):
             with self.subTest(replacement=replacement):
                 with self.assertRaisesRegex(ValueError, "replacement"):
                     ARTICLE_EDITOR.validate_patch(
                         manifest,
-                        ["p_002"],
+                        ["b_002"],
                         {
                             "article_version": 1,
                             "operations": [
-                                {"block_id": "p_002", "action": "replace", "replacement": replacement}
+                                {"block_id": "b_002", "action": "replace", "replacement": replacement}
                             ],
                         },
                     )
@@ -280,7 +386,7 @@ class ArticleEditingContractTests(unittest.TestCase):
         payload = ARTICLE_EDITOR.build_gemini_payload(
             self.ARTICLE,
             manifest,
-            ["p_002", "p_003"],
+            ["b_001", "b_002"],
             "Второй оставь, третий сократи.",
             "google/gemini-2.5-pro",
         )
@@ -289,7 +395,8 @@ class ArticleEditingContractTests(unittest.TestCase):
         self.assertTrue(payload["provider"]["require_parameters"])
         prompt = payload["messages"][0]["content"]
         self.assertIn(self.ARTICLE.strip(), prompt)
-        self.assertIn("p_002", prompt)
+        self.assertIn("b_002", prompt)
+        self.assertIn("полный Markdown", prompt)
         self.assertIn("Второй оставь, третий сократи", prompt)
 
     def test_editor_html_has_fixed_numbers_and_never_uses_inner_html(self) -> None:
@@ -303,10 +410,10 @@ class ArticleEditingContractTests(unittest.TestCase):
                 "blocks": manifest["blocks"],
             },
         )
-        self.assertIn('data-block-id="p_001"', rendered)
-        self.assertIn('data-block-id="p_003"', rendered)
+        self.assertIn('data-block-id="b_001"', rendered)
+        self.assertIn('data-block-id="b_002"', rendered)
         self.assertIn('class="edit-number">1<', rendered)
-        self.assertIn('class="edit-number">3<', rendered)
+        self.assertIn('class="edit-number">2<', rendered)
         self.assertIn("window.Telegram && window.Telegram.WebApp", rendered)
         self.assertIn("telegram.initData", rendered)
         self.assertNotIn("innerHTML", rendered)
@@ -361,24 +468,24 @@ class ArticleSelectionSecurityTests(unittest.TestCase):
                 teacher_id="42",
                 run_key="run123",
                 article_version=1,
-                selected_block_ids=["p_002"],
+                selected_block_ids=["b_001"],
                 action="set",
                 now="2026-08-26T12:00:00Z",
             )
-            self.assertEqual(selected, ["p_002"])
-            self.assertEqual(registry["pending_article_edits"]["42"]["selected_block_ids"], ["p_002"])
+            self.assertEqual(selected, ["b_001"])
+            self.assertEqual(registry["pending_article_edits"]["42"]["selected_block_ids"], ["b_001"])
 
             with self.assertRaisesRegex(PermissionError, "owner"):
                 WEBHOOK.update_article_selection(
-                    registry, "99", "run123", 1, ["p_001"], "set", "now"
+                    registry, "99", "run123", 1, ["b_001"], "set", "now"
                 )
             with self.assertRaisesRegex(ValueError, "version"):
                 WEBHOOK.update_article_selection(
-                    registry, "42", "run123", 2, ["p_001"], "set", "now"
+                    registry, "42", "run123", 2, ["b_001"], "set", "now"
                 )
             with self.assertRaisesRegex(ValueError, "block"):
                 WEBHOOK.update_article_selection(
-                    registry, "42", "run123", 1, ["p_999"], "set", "now"
+                    registry, "42", "run123", 1, ["b_999"], "set", "now"
                 )
 
     def test_get_selection_does_not_mutate_and_empty_set_clears_pending(self) -> None:
@@ -394,14 +501,14 @@ class ArticleSelectionSecurityTests(unittest.TestCase):
                     "42": {
                         "run_key": "run123",
                         "article_version": 1,
-                        "selected_block_ids": ["p_001"],
+                        "selected_block_ids": ["b_001"],
                     }
                 },
             }
             selected = WEBHOOK.update_article_selection(
                 registry, "42", "run123", 1, [], "get", "now"
             )
-            self.assertEqual(selected, ["p_001"])
+            self.assertEqual(selected, ["b_001"])
             WEBHOOK.update_article_selection(registry, "42", "run123", 1, [], "set", "now")
             self.assertNotIn("42", registry["pending_article_edits"])
 
@@ -413,7 +520,10 @@ class ArticleEditWorkerTests(unittest.TestCase):
         self.run_dir = self.root / "run"
         self.run_dir.mkdir()
         self.article = self.run_dir / "roadmap-article.md"
-        self.article.write_text("# Roadmap\n\nПервый абзац.\n\nВторой абзац.\n", encoding="utf-8")
+        self.article.write_text(
+            "# Roadmap\n\nПервый абзац.\n\n## Второй блок\n\nВторой абзац.\n",
+            encoding="utf-8",
+        )
         self.manifest = ARTICLE_EDITOR.build_manifest(self.article.read_text(encoding="utf-8"))
         (self.run_dir / "roadmap-article-blocks.json").write_text(
             json.dumps(self.manifest, ensure_ascii=False), encoding="utf-8"
@@ -431,7 +541,7 @@ class ArticleEditWorkerTests(unittest.TestCase):
             "audio": "lesson.m4a",
             "chat_id": "42",
             "article_version": 1,
-            "selected_block_ids": ["p_002"],
+            "selected_block_ids": ["b_002"],
             "instruction": "Второй абзац сократи.",
         }, ensure_ascii=False), encoding="utf-8")
         self.commands: list[list[str]] = []
@@ -452,9 +562,9 @@ class ArticleEditWorkerTests(unittest.TestCase):
         return {
             "article_version": 1,
             "operations": [{
-                "block_id": "p_002",
+                "block_id": "b_002",
                 "action": "replace",
-                "replacement": "Второй абзац стал короче.",
+                "replacement": "## Второй блок\n\nВторой абзац стал короче.",
             }],
         }
 
@@ -1989,7 +2099,7 @@ class WebhookApprovalTests(TempRunMixin, unittest.TestCase):
         self.assertTrue(any("активной проверки" in text for text in sent_texts))
 
     def test_voice_with_article_selection_creates_one_edit_job(self) -> None:
-        article = "# Roadmap\n\nПервый абзац.\n\nВторой абзац.\n"
+        article = "# Roadmap\n\nПервый абзац.\n\n## Второй блок\n\nВторой абзац.\n"
         (self.run_dir / "roadmap-article.md").write_text(article, encoding="utf-8")
         manifest = ARTICLE_EDITOR.build_manifest(article)
         (self.run_dir / "roadmap-article-blocks.json").write_text(
@@ -2003,7 +2113,7 @@ class WebhookApprovalTests(TempRunMixin, unittest.TestCase):
                 "run_dir": str(self.run_dir),
                 "audio": "lesson.m4a",
                 "article_version": 1,
-                "selected_block_ids": ["p_002"],
+                "selected_block_ids": ["b_002"],
             }
         }
         self.registry.write_text(json.dumps(registry), encoding="utf-8")
@@ -2018,14 +2128,14 @@ class WebhookApprovalTests(TempRunMixin, unittest.TestCase):
         job_path = Path(worker_mock.call_args.args[1])
         job = json.loads(job_path.read_text(encoding="utf-8"))
         self.assertEqual(job["article_version"], 1)
-        self.assertEqual(job["selected_block_ids"], ["p_002"])
+        self.assertEqual(job["selected_block_ids"], ["b_002"])
         self.assertEqual(job["instruction"], "Второй сократи.")
         saved_registry = json.loads(self.registry.read_text(encoding="utf-8"))
         self.assertNotIn("42", saved_registry.get("pending_article_edits", {}))
         self.assertEqual(self.status()["article_edit_status"], "queued")
         self.start_mock.assert_not_called()
         sent_texts = [payload["text"] for method, payload in self.sent if method == "sendMessage"]
-        self.assertTrue(any("выбранным абзацам" in text for text in sent_texts))
+        self.assertTrue(any("выбранным блокам" in text for text in sent_texts))
 
     def test_text_with_article_selection_uses_same_edit_flow(self) -> None:
         article = "# Roadmap\n\nПервый абзац.\n"
@@ -2041,7 +2151,7 @@ class WebhookApprovalTests(TempRunMixin, unittest.TestCase):
                 "run_dir": str(self.run_dir),
                 "audio": "lesson.m4a",
                 "article_version": 1,
-                "selected_block_ids": ["p_001"],
+                "selected_block_ids": ["b_001"],
             }
         }
         self.registry.write_text(json.dumps(registry), encoding="utf-8")
