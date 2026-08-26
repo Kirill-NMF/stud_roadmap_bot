@@ -149,7 +149,7 @@ Latest deployed article routing (2026-08-26):
   `roadmap-pipeline-doctor`, source/runtime hash match, Codex login status, and a
   small real `gpt-5.6-terra` high-reasoning model probe.
 
-Pending Codex latency policy (2026-08-26):
+Deployed Codex latency policy (2026-08-26):
 
 - Historical VPS logs show normal Codex CLI article runs completing in
   `36-63` seconds. The two runs containing `Reconnecting... 2/5` took
@@ -157,6 +157,11 @@ Pending Codex latency policy (2026-08-26):
 - The selected policy is two Codex CLI attempts with an `80` second timeout per
   attempt and the existing `3` second retry delay. After the second failure,
   generation falls back once to the existing OpenRouter article wrapper.
+- Commit `7e67f31` is deployed on the VPS. The installed wrapper matches the
+  repository source, the full VPS suite passes `90/90`, and
+  `roadmap-pipeline-doctor` is green. No real model call was made for this gate.
+- Production backup before this deployment:
+  `/var/backups/zoom-audio-pipeline/7e67f31-pre`.
 
 Latest deployed recovery (2026-08-26):
 
