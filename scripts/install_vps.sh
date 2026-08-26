@@ -43,6 +43,7 @@ install -m 0755 "$ROOT_DIR/scripts/generate_verification_with_openrouter.sh" "$B
 install -m 0755 "$ROOT_DIR/scripts/generate_article_with_openrouter.sh" "$BIN_DIR/generate-article-with-openrouter"
 install -m 0755 "$ROOT_DIR/scripts/generate_article_with_codex.sh" "$BIN_DIR/generate-article-with-codex"
 install -m 0755 "$ROOT_DIR/scripts/run_codex_article_hedge.py" "$BIN_DIR/run-codex-article-hedge"
+install -m 0755 "$ROOT_DIR/scripts/roadmap_article_editor.py" "$BIN_DIR/roadmap-article-editor"
 install -m 0755 "$ROOT_DIR/scripts/generate_article_with_gemini_rewrite.sh" "$BIN_DIR/generate-article-with-gemini-rewrite"
 install -m 0755 "$ROOT_DIR/scripts/validate_gemini_rewrite.py" "$BIN_DIR/validate-gemini-rewrite"
 install -m 0755 "$ROOT_DIR/scripts/doctor_vps.sh" "$BIN_DIR/roadmap-pipeline-doctor"
@@ -73,6 +74,7 @@ python3 -m py_compile \
   "$BIN_DIR/telegram-roadmap-webhook" \
   "$BIN_DIR/telegram-notion-archive-worker" \
   "$BIN_DIR/telegram-intake-cleanup" \
+  "$BIN_DIR/roadmap-article-editor" \
   "$BIN_DIR/configure-pipeline-env-from-legacy" \
   "$BIN_DIR/openrouter-roadmap-generate"
 

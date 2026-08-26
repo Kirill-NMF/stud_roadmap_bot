@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import hmac
 import json
 import mimetypes
 import os
@@ -12,6 +13,7 @@ import re
 import subprocess
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -35,6 +37,7 @@ DEFAULT_TELEGRAM_INTAKE_DIR = "/var/lib/zoom-audio-pipeline/telegram-intake"
 DEFAULT_TELEGRAM_NOTION_INTAKE_STATE = "/var/lib/zoom-audio-pipeline/telegram-notion-intake.json"
 DEFAULT_INBOX_DIR = "/var/lib/zoom-audio-pipeline/inbox"
 DEFAULT_NOTION_ARCHIVE_WORKER = "/usr/local/bin/telegram-notion-archive-worker"
+DEFAULT_ARTICLE_EDITOR = "/usr/local/bin/roadmap-article-editor"
 DEFAULT_TELEGRAM_API_BASE_URL = "https://api.telegram.org"
 DEFAULT_TELEGRAM_CLOUD_MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024
 DEFAULT_LOCAL_BOT_API_ROOT = "/var/lib/telegram-bot-api"
@@ -42,6 +45,8 @@ NOTION_UPLOAD_VERSION = "2026-03-11"
 NOTION_SINGLE_PART_MAX_BYTES = 20 * 1024 * 1024
 NOTION_MULTI_PART_CHUNK_BYTES = 10 * 1024 * 1024
 PROCESSED_TELEGRAM_MESSAGES_LIMIT = 500
+TELEGRAM_WEBAPP_MAX_AGE_SECONDS = 24 * 60 * 60
+ARTICLE_SELECTION_MAX_BLOCKS = 200
 
 
 class TelegramFileTooLargeError(RuntimeError):
@@ -107,6 +112,98 @@ def append_event(path: Path, event: dict[str, Any]) -> None:
     event = {"ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), **event}
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(event, ensure_ascii=False) + "\n")
+
+
+def validate_telegram_webapp_init_data(
+    init_data: str,
+    bot_token: str,
+    *,
+    now: int | None = None,
+    max_age_seconds: int = TELEGRAM_WEBAPP_MAX_AGE_SECONDS,
+) -> str:
+    values = dict(urllib.parse.parse_qsl(init_data, keep_blank_values=True))
+    received_hash = values.pop("hash", "")
+    if not received_hash:
+        raise ValueError("Telegram WebApp signature is missing")
+    check_string = "\n".join(f"{key}={values[key]}" for key in sorted(values))
+    secret = hmac.new(b"WebAppData", bot_token.encode("utf-8"), hashlib.sha256).digest()
+    expected_hash = hmac.new(secret, check_string.encode("utf-8"), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(received_hash, expected_hash):
+        raise ValueError("Telegram WebApp signature is invalid")
+    try:
+        auth_date = int(values.get("auth_date", "0"))
+    except ValueError as error:
+        raise ValueError("Telegram WebApp auth_date is invalid") from error
+    current = int(time.time()) if now is None else int(now)
+    if auth_date <= 0 or auth_date > current + 30 or current - auth_date > max_age_seconds:
+        raise ValueError("Telegram WebApp request is expired")
+    try:
+        user = json.loads(values.get("user", "{}"))
+    except json.JSONDecodeError as error:
+        raise ValueError("Telegram WebApp user is invalid") from error
+    user_id = user.get("id") if isinstance(user, dict) else None
+    if not isinstance(user_id, int):
+        raise ValueError("Telegram WebApp user is missing")
+    return str(user_id)
+
+
+def update_article_selection(
+    registry: dict[str, Any],
+    teacher_id: str,
+    run_key: str,
+    article_version: int,
+    selected_block_ids: list[str],
+    action: str,
+    now: str,
+) -> list[str]:
+    runs = registry.get("runs", {})
+    item = runs.get(run_key) if isinstance(runs, dict) else None
+    if not isinstance(item, dict):
+        raise ValueError("article run was not found")
+    if str(item.get("chat_id") or "") != str(teacher_id):
+        raise PermissionError("article owner does not match")
+    run_dir = Path(str(item.get("run_dir") or ""))
+    manifest = load_json(run_dir / "roadmap-article-blocks.json", {})
+    if not isinstance(manifest, dict) or manifest.get("article_version") != article_version:
+        raise ValueError("article version is stale")
+    blocks = manifest.get("blocks", [])
+    known_ids = {
+        str(block.get("id"))
+        for block in blocks
+        if isinstance(block, dict) and block.get("id")
+    }
+    if action not in {"get", "set"}:
+        raise ValueError("selection action is invalid")
+    pending = registry.setdefault("pending_article_edits", {})
+    if not isinstance(pending, dict):
+        raise ValueError("pending article edit state is invalid")
+    existing = pending.get(str(teacher_id), {})
+    if action == "get":
+        if (
+            isinstance(existing, dict)
+            and existing.get("run_key") == run_key
+            and existing.get("article_version") == article_version
+        ):
+            saved = existing.get("selected_block_ids", [])
+            return [str(value) for value in saved] if isinstance(saved, list) else []
+        return []
+    if not isinstance(selected_block_ids, list) or len(selected_block_ids) > ARTICLE_SELECTION_MAX_BLOCKS:
+        raise ValueError("selected block list is invalid")
+    selected = [str(value) for value in selected_block_ids]
+    if len(selected) != len(set(selected)) or not set(selected).issubset(known_ids):
+        raise ValueError("selected block list contains an unknown block")
+    if not selected:
+        pending.pop(str(teacher_id), None)
+        return []
+    pending[str(teacher_id)] = {
+        "run_key": run_key,
+        "run_dir": str(run_dir),
+        "audio": str(item.get("audio") or run_dir.name),
+        "article_version": article_version,
+        "selected_block_ids": selected,
+        "updated_at": now,
+    }
+    return selected
 
 
 def telegram_api_base_url(value: str | None = None) -> str:
@@ -210,6 +307,72 @@ def start_notion_archive_worker_async(config: dict[str, str], intake_id: str = "
         )
     except Exception as error:
         print(f"notion_archive_worker_start_error: {error!r}", flush=True)
+
+
+def start_article_edit_worker_async(config: dict[str, str], job_path: Path) -> None:
+    log_path = Path(config.get("events_file", DEFAULT_EVENTS_FILE)).parent / "article-edit-worker.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("ab") as log_handle:
+        subprocess.Popen(
+            [
+                config.get("article_editor", DEFAULT_ARTICLE_EDITOR),
+                "apply-job",
+                "--job",
+                str(job_path),
+                "--env-file",
+                config.get("env_file", "/etc/zoom-audio-pipeline/pipeline.env"),
+            ],
+            stdout=log_handle,
+            stderr=log_handle,
+            start_new_session=True,
+        )
+
+
+def create_article_edit_job(
+    registry_file: Path,
+    pending_edit: dict[str, Any],
+    message: dict[str, Any],
+    instruction: str,
+    source: str,
+) -> Path:
+    run_dir = Path(str(pending_edit["run_dir"]))
+    message_id = str(message.get("message_id") or "")
+    if not message_id:
+        identity = json.dumps(message, ensure_ascii=False, sort_keys=True)
+        message_id = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
+    job_id = f"telegram-{message.get('chat', {}).get('id')}-{message_id}"
+    job_path = run_dir / "article-edit-jobs" / f"{job_id}.json"
+    if job_path.exists():
+        return job_path
+    job = {
+        "job_id": job_id,
+        "status": "queued",
+        "created_at": utc_now(),
+        "run_key": str(pending_edit["run_key"]),
+        "run_dir": str(run_dir),
+        "audio": str(pending_edit.get("audio") or run_dir.name),
+        "chat_id": str(message.get("chat", {}).get("id") or ""),
+        "article_version": int(pending_edit["article_version"]),
+        "selected_block_ids": [str(value) for value in pending_edit["selected_block_ids"]],
+        "instruction": instruction,
+        "source": source,
+        "telegram_message_id": message_id,
+        "registry_file": str(registry_file),
+    }
+    save_json(job_path, job)
+    status_path = run_dir / "status.json"
+    status = load_json(status_path, {})
+    if not isinstance(status, dict):
+        status = {}
+    status.update({
+        "article_edit_status": "queued",
+        "article_edit_job": str(job_path),
+        "article_edit_requested_at": utc_now(),
+        "article_edit_source": source,
+        "article_edit_selected_blocks": job["selected_block_ids"],
+    })
+    save_json(status_path, status)
+    return job_path
 
 
 def download_telegram_file(
@@ -904,6 +1067,9 @@ def make_handler(config: dict[str, str]):
             self.send_json(404, {"ok": False})
 
         def do_POST(self) -> None:
+            if self.path == "/roadmap-telegram/article-selection":
+                self.handle_article_selection_request()
+                return
             if self.path != "/roadmap-telegram/webhook":
                 self.send_json(404, {"ok": False})
                 return
@@ -914,6 +1080,35 @@ def make_handler(config: dict[str, str]):
             update = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
             self.handle_update(update)
             self.send_json(200, {"ok": True})
+
+        def handle_article_selection_request(self) -> None:
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if length <= 0 or length > 32 * 1024:
+                    raise ValueError("request size is invalid")
+                payload = json.loads(self.rfile.read(length).decode("utf-8"))
+                if not isinstance(payload, dict):
+                    raise ValueError("request body must be an object")
+                teacher_id = validate_telegram_webapp_init_data(
+                    str(payload.get("init_data") or ""), token
+                )
+                registry = load_json(registry_file, {"runs": {}})
+                selected = update_article_selection(
+                    registry,
+                    teacher_id,
+                    str(payload.get("run_key") or ""),
+                    int(payload.get("article_version") or 0),
+                    payload.get("selected_block_ids", []),
+                    str(payload.get("action") or ""),
+                    utc_now(),
+                )
+                if str(payload.get("action") or "") == "set":
+                    save_json(registry_file, registry)
+                self.send_json(200, {"ok": True, "selected_block_ids": selected})
+            except PermissionError:
+                self.send_json(403, {"ok": False, "error": "forbidden"})
+            except (ValueError, TypeError, json.JSONDecodeError) as error:
+                self.send_json(400, {"ok": False, "error": str(error)})
 
         def handle_update(self, update: dict[str, Any]) -> None:
             if update.get("message"):
@@ -1026,6 +1221,68 @@ def make_handler(config: dict[str, str]):
             if telegram_message_already_processed(registry, message):
                 return
             pending = registry.get("pending_reviews", {}).get(str(chat_id))
+            pending_edit = registry.get("pending_article_edits", {}).get(str(chat_id))
+            if not pending and isinstance(pending_edit, dict):
+                has_correction = bool(
+                    str(message.get("text", "")).strip()
+                    or message.get("voice")
+                    or message.get("audio")
+                    or (
+                        message.get("document")
+                        and str(message["document"].get("mime_type", "")).startswith("audio/")
+                    )
+                )
+                if has_correction:
+                    mark_telegram_message_processed(registry, message)
+                    save_json(registry_file, registry)
+                    if message.get("voice") or message.get("audio") or message.get("document"):
+                        safe_telegram_request(token, "sendMessage", {
+                            "chat_id": chat_id,
+                            "text": "Голосовое получил. Расшифровываю правки к выбранным абзацам.",
+                            "disable_web_page_preview": True,
+                        }, api_base_url=api_base_url)
+                    text, source = correction_text_from_message(
+                        config,
+                        token,
+                        Path(str(pending_edit["run_dir"])),
+                        message,
+                    )
+                    if not text or (text.startswith("/") and source == "text"):
+                        safe_telegram_request(token, "sendMessage", {
+                            "chat_id": chat_id,
+                            "text": "Не смог получить текст правки. Выбор абзацев сохранён, пришли сообщение ещё раз.",
+                            "disable_web_page_preview": True,
+                        }, api_base_url=api_base_url)
+                        return
+                    job_path = create_article_edit_job(
+                        registry_file,
+                        pending_edit,
+                        message,
+                        text,
+                        source,
+                    )
+                    registry = load_json(registry_file, {"runs": {}})
+                    registry.get("pending_article_edits", {}).pop(str(chat_id), None)
+                    save_json(registry_file, registry)
+                    append_event(events_file, {
+                        "stage": "article_edit_queued",
+                        "chat_id": str(chat_id),
+                        "run_dir": str(pending_edit["run_dir"]),
+                        "job": str(job_path),
+                        "article_version": pending_edit["article_version"],
+                        "selected_block_ids": pending_edit["selected_block_ids"],
+                        "source": source,
+                    })
+                    start_article_edit_worker_async(config, job_path)
+                    safe_telegram_request(token, "sendMessage", {
+                        "chat_id": chat_id,
+                        "text": (
+                            "Правки к выбранным абзацам приняты. Gemini Pro обновляет статью; "
+                            "пришлю новые HTML и PDF, когда всё будет готово."
+                        ),
+                        "disable_web_page_preview": True,
+                    }, api_base_url=api_base_url)
+                    return
             if not pending:
                 if message.get("voice"):
                     mark_telegram_message_processed(registry, message)
@@ -1238,6 +1495,7 @@ def main() -> int:
     handler = make_handler({
         "token": token,
         "secret": secret,
+        "env_file": args.env_file,
         "registry_file": args.registry_file,
         "events_file": args.events_file,
         "voice_python": env.get("TELEGRAM_VOICE_TRANSCRIBE_PYTHON", env.get("PIPELINE_PYTHON", DEFAULT_VOICE_PYTHON)),
@@ -1255,6 +1513,7 @@ def main() -> int:
         "telegram_notion_intake_state": args.telegram_notion_intake_state,
         "inbox_dir": args.inbox_dir,
         "notion_archive_worker": args.notion_archive_worker,
+        "article_editor": env.get("ROADMAP_ARTICLE_EDITOR", DEFAULT_ARTICLE_EDITOR),
         "telegram_api_base_url": env.get("TELEGRAM_API_BASE_URL", args.telegram_api_base_url),
         "telegram_cloud_max_download_bytes": str(
             int(env.get("TELEGRAM_CLOUD_MAX_DOWNLOAD_MB", str(args.telegram_cloud_max_download_mb))) * 1024 * 1024

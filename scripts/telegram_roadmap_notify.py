@@ -21,6 +21,7 @@ DEFAULT_REGISTRY_FILE = "/var/lib/zoom-audio-pipeline/telegram-run-registry.json
 DEFAULT_PUBLIC_ROOT = "/var/www/roadmap-reader"
 DEFAULT_PUBLIC_BASE_URL = "https://dev.short-talk.space/roadmap-reader"
 DEFAULT_TELEGRAM_API_BASE_URL = "https://api.telegram.org"
+DEFAULT_ARTICLE_EDITOR = "/usr/local/bin/roadmap-article-editor"
 TELEGRAM_MESSAGE_LIMIT = 4096
 VERIFICATION_BRIEF_FILE = "verification-brief.md"
 
@@ -546,6 +547,34 @@ def publish_markdown(source: Path, kind: str, public_root: Path, public_base_url
     return f"{public_base_url.rstrip('/')}/{key}/{kind}.html"
 
 
+def publish_editable_article(
+    source: Path,
+    public_root: Path,
+    public_base_url: str,
+    run_key: str,
+    editor_script: str,
+) -> str:
+    if not source.exists():
+        return ""
+    key = hashlib.sha1(str(source).encode("utf-8")).hexdigest()[:16]
+    out_dir = public_root / key
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / "article.html"
+    subprocess.run([
+        editor_script,
+        "prepare",
+        "--source",
+        str(source),
+        "--output",
+        str(out_path),
+        "--run-key",
+        run_key,
+        "--api-url",
+        "/roadmap-telegram/article-selection",
+    ], check=True)
+    return f"{public_base_url.rstrip('/')}/{key}/article.html"
+
+
 def send_text_messages(
     token: str,
     chat_id: str,
@@ -673,7 +702,14 @@ def main() -> int:
         if not args.audio or not args.run_dir:
             print("--audio and --run-dir are required for article_ready", file=sys.stderr)
             return 2
-        public_url = publish_markdown(run_dir / "roadmap-article.md", "article", public_root, public_base_url)
+        key = register_run(Path(args.registry_file), args.run_dir, args.audio, str(chat_id))
+        public_url = publish_editable_article(
+            run_dir / "roadmap-article.md",
+            public_root,
+            public_base_url,
+            key,
+            env.get("ROADMAP_ARTICLE_EDITOR", DEFAULT_ARTICLE_EDITOR),
+        )
         text = build_article_message(run_dir, args.audio)
         article_pdf = ensure_article_pdf(run_dir)
         if public_url:

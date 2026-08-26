@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import html
+import json
 import re
 import sys
 from pathlib import Path
@@ -120,6 +121,55 @@ tr:nth-child(even) td {
   color: var(--muted);
 }
 
+.edit-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 44px;
+  gap: 12px;
+  align-items: start;
+}
+
+.edit-row > p {
+  min-width: 0;
+}
+
+.edit-choice {
+  position: sticky;
+  top: 12px;
+  display: grid;
+  justify-items: center;
+  gap: 4px;
+  padding-top: 2px;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.edit-choice input {
+  width: 20px;
+  height: 20px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.edit-number {
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.edit-status {
+  position: sticky;
+  bottom: 12px;
+  z-index: 2;
+  margin: 24px 0 0;
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--paper);
+  color: var(--muted);
+  font-size: 14px;
+  box-shadow: 0 6px 18px rgba(32, 33, 36, 0.08);
+}
+
 @media (max-width: 640px) {
   .page {
     padding: 0;
@@ -185,21 +235,44 @@ def render_table(lines: list[str]) -> str:
     return "\n".join(out)
 
 
-def markdown_to_body(markdown: str) -> tuple[str, str]:
-    lines = markdown.strip().splitlines()
+def markdown_to_body(markdown: str, editor: dict[str, object] | None = None) -> tuple[str, str]:
+    lines = markdown.splitlines()
     title = "Roadmap"
     output: list[str] = []
     paragraph: list[str] = []
+    paragraph_start = -1
     list_items: list[str] = []
     i = 0
 
     def flush_paragraph() -> None:
-        nonlocal paragraph
+        nonlocal paragraph, paragraph_start
         if paragraph:
             text = " ".join(part.strip() for part in paragraph if part.strip())
             cls = ' class="lead"' if not output and not text.startswith("<") else ""
-            output.append(f"<p{cls}>{inline_markdown(text)}</p>")
+            paragraph_html = f"<p{cls}>{inline_markdown(text)}</p>"
+            editor_blocks = editor.get("blocks", []) if editor else []
+            block = next((
+                item for item in editor_blocks
+                if isinstance(item, dict)
+                and item.get("start_line") == paragraph_start
+                and item.get("end_line") == i
+            ), None)
+            if block:
+                block_id = html.escape(str(block["id"]), quote=True)
+                number = html.escape(str(block["number"]), quote=True)
+                output.extend([
+                    f'<div class="edit-row" data-block-id="{block_id}">',
+                    paragraph_html,
+                    f'<label class="edit-choice" title="Выбрать абзац {number}">',
+                    f'<input type="checkbox" value="{block_id}" aria-label="Выбрать абзац {number}">',
+                    f'<span class="edit-number">{number}</span>',
+                    "</label>",
+                    "</div>",
+                ])
+            else:
+                output.append(paragraph_html)
             paragraph = []
+            paragraph_start = -1
 
     def flush_list() -> None:
         nonlocal list_items
@@ -257,6 +330,8 @@ def markdown_to_body(markdown: str) -> tuple[str, str]:
             title = re.sub(r"\*\*(.+?)\*\*", r"\1", stripped)
             output.append(f"<h1>{inline_markdown(stripped)}</h1>")
         else:
+            if not paragraph:
+                paragraph_start = i
             paragraph.append(stripped)
         i += 1
 
@@ -265,8 +340,64 @@ def markdown_to_body(markdown: str) -> tuple[str, str]:
     return title, "\n".join(output)
 
 
-def render_html(markdown: str) -> str:
-    title, body = markdown_to_body(markdown)
+def editor_script(editor: dict[str, object] | None) -> str:
+    if not editor:
+        return ""
+    config = json.dumps({
+        "run_key": str(editor.get("run_key", "")),
+        "article_version": int(editor.get("article_version", 0)),
+        "api_url": str(editor.get("api_url", "/roadmap-telegram/article-selection")),
+    }, ensure_ascii=False).replace("<", "\\u003c")
+    return f"""
+    <p class="edit-status" id="edit-status" role="status">Отметь абзацы и пришли правки голосом в боте.</p>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <script>
+    (() => {{
+      const config = {config};
+      const status = document.getElementById("edit-status");
+      const inputs = Array.from(document.querySelectorAll(".edit-choice input"));
+      const telegram = window.Telegram && window.Telegram.WebApp;
+      if (telegram) telegram.ready();
+
+      const setStatus = (message) => {{ status.textContent = message; }};
+      const selectedIds = () => inputs.filter((input) => input.checked).map((input) => input.value);
+      const request = async (action) => {{
+        if (!telegram || !telegram.initData) {{
+          setStatus("Выбор доступен при открытии статьи из Telegram.");
+          return;
+        }}
+        const response = await fetch(config.api_url, {{
+          method: "POST",
+          headers: {{"Content-Type": "application/json"}},
+          body: JSON.stringify({{
+            action,
+            init_data: telegram.initData,
+            run_key: config.run_key,
+            article_version: config.article_version,
+            selected_block_ids: selectedIds(),
+          }}),
+        }});
+        const result = await response.json();
+        if (!response.ok || !result.ok) throw new Error(result.error || "selection_failed");
+        if (action === "get") {{
+          const saved = new Set(result.selected_block_ids || []);
+          inputs.forEach((input) => {{ input.checked = saved.has(input.value); }});
+        }}
+        const count = selectedIds().length;
+        setStatus(count ? `Выбрано: ${{count}}. Пришли правки голосом в боте.` : "Отметь абзацы и пришли правки голосом в боте.");
+      }};
+      inputs.forEach((input) => input.addEventListener("change", () => {{
+        setStatus("Сохраняю выбор...");
+        request("set").catch(() => setStatus("Не удалось сохранить выбор. Открой статью из Telegram и попробуй ещё раз."));
+      }}));
+      request("get").catch(() => setStatus("Открой статью из Telegram, чтобы выбрать абзацы."));
+    }})();
+    </script>
+"""
+
+
+def render_html(markdown: str, editor: dict[str, object] | None = None) -> str:
+    title, body = markdown_to_body(markdown, editor=editor)
     return f"""<!doctype html>
 <html lang="ru">
 <head>
@@ -281,6 +412,7 @@ def render_html(markdown: str) -> str:
   <main class="page">
     <article class="article">
 {body}
+{editor_script(editor)}
     </article>
   </main>
 </body>
@@ -292,6 +424,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Convert roadmap Markdown to standalone HTML.")
     parser.add_argument("input", nargs="?", help="Markdown input file. If omitted, stdin is used.")
     parser.add_argument("-o", "--output", help="HTML output file. Defaults to input path with .html.")
+    parser.add_argument("--editor-config", help="Optional JSON config with article blocks and editor API metadata.")
     args = parser.parse_args()
 
     if args.input:
@@ -304,7 +437,8 @@ def main() -> int:
             raise SystemExit("--output is required when reading from stdin")
         output_path = Path(args.output)
 
-    output_path.write_text(render_html(markdown), encoding="utf-8")
+    editor = json.loads(Path(args.editor_config).read_text(encoding="utf-8")) if args.editor_config else None
+    output_path.write_text(render_html(markdown, editor=editor), encoding="utf-8")
     print(output_path)
     return 0
 

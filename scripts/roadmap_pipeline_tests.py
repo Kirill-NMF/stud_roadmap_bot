@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
+import hmac
 import io
 import json
 import os
@@ -12,6 +14,7 @@ import sys
 import tempfile
 import time
 import unittest
+import urllib.parse
 from pathlib import Path
 from urllib.error import HTTPError
 from unittest.mock import patch
@@ -32,6 +35,11 @@ def load_module(name: str, relative_path: str):
 
 WEBHOOK = load_module("telegram_roadmap_webhook", "scripts/telegram_roadmap_webhook.py")
 NOTIFY = load_module("telegram_roadmap_notify", "scripts/telegram_roadmap_notify.py")
+ARTICLE_EDITOR = load_module("roadmap_article_editor", "scripts/roadmap_article_editor.py")
+ARTICLE_RENDERER = load_module(
+    "roadmap_markdown_to_html",
+    "skills/english-roadmap-rewrite/scripts/roadmap_markdown_to_html.py",
+)
 APPROVED = load_module("process_approved_roadmaps", "scripts/process_approved_roadmaps.py")
 PROCESS_AUDIO = load_module("process_new_audio", "scripts/process_new_audio.py")
 NOTION_PULL = load_module("notion_pull_audio", "scripts/notion_pull_audio.py")
@@ -158,6 +166,404 @@ class PromptRuleTests(unittest.TestCase):
         self.assertIn("Не сокращай остальные разделы", prompt)
         self.assertIn("одно короткое предложение", prompt)
         self.assertIn("не более 2-3 кратких действий", prompt)
+
+
+class ArticleEditingContractTests(unittest.TestCase):
+    ARTICLE = """# Roadmap
+
+Вступление в спокойном поддерживающем тоне.
+
+## Текущая точка
+
+Первый содержательный абзац с уровнем A1.
+
+Второй содержательный абзац про два занятия в неделю.
+
+- Пункт списка остаётся неизменным.
+
+| Срок | Результат |
+| --- | --- |
+| 3 месяца | A2 |
+"""
+
+    def test_manifest_numbers_only_editable_paragraphs_in_article_order(self) -> None:
+        manifest = ARTICLE_EDITOR.build_manifest(self.ARTICLE)
+        self.assertEqual(manifest["article_version"], 1)
+        self.assertEqual(
+            [(block["id"], block["number"], block["text"]) for block in manifest["blocks"]],
+            [
+                ("p_001", 1, "Вступление в спокойном поддерживающем тоне."),
+                ("p_002", 2, "Первый содержательный абзац с уровнем A1."),
+                ("p_003", 3, "Второй содержательный абзац про два занятия в неделю."),
+            ],
+        )
+
+    def test_patch_changes_only_selected_blocks_and_preserves_order(self) -> None:
+        manifest = ARTICLE_EDITOR.build_manifest(self.ARTICLE)
+        updated = ARTICLE_EDITOR.apply_validated_patch(
+            self.ARTICLE,
+            manifest,
+            ["p_002", "p_003"],
+            {
+                "article_version": 1,
+                "operations": [
+                    {"block_id": "p_002", "action": "keep", "replacement": ""},
+                    {
+                        "block_id": "p_003",
+                        "action": "replace",
+                        "replacement": "Второй абзац стал короче, но сохранил стиль.",
+                    },
+                ],
+            },
+        )
+        self.assertIn("Первый содержательный абзац с уровнем A1.", updated)
+        self.assertIn("Второй абзац стал короче, но сохранил стиль.", updated)
+        self.assertNotIn("Второй содержательный абзац про два занятия", updated)
+        self.assertIn("- Пункт списка остаётся неизменным.", updated)
+        self.assertLess(updated.index("Первый содержательный"), updated.index("Второй абзац стал"))
+
+    def test_delete_creates_new_version_and_fresh_display_numbers(self) -> None:
+        manifest = ARTICLE_EDITOR.build_manifest(self.ARTICLE)
+        updated = ARTICLE_EDITOR.apply_validated_patch(
+            self.ARTICLE,
+            manifest,
+            ["p_002"],
+            {
+                "article_version": 1,
+                "operations": [{"block_id": "p_002", "action": "delete", "replacement": ""}],
+            },
+        )
+        next_manifest = ARTICLE_EDITOR.build_manifest(updated, previous=manifest)
+        self.assertEqual(next_manifest["article_version"], 2)
+        self.assertEqual([block["number"] for block in next_manifest["blocks"]], [1, 2])
+        self.assertEqual([block["id"] for block in next_manifest["blocks"]], ["p_001", "p_002"])
+
+    def test_patch_requires_exact_selected_set_and_current_version(self) -> None:
+        manifest = ARTICLE_EDITOR.build_manifest(self.ARTICLE)
+        with self.assertRaisesRegex(ValueError, "selected block set"):
+            ARTICLE_EDITOR.validate_patch(
+                manifest,
+                ["p_002", "p_003"],
+                {
+                    "article_version": 1,
+                    "operations": [{"block_id": "p_002", "action": "keep", "replacement": ""}],
+                },
+            )
+        with self.assertRaisesRegex(ValueError, "article version"):
+            ARTICLE_EDITOR.validate_patch(
+                manifest,
+                ["p_002"],
+                {
+                    "article_version": 2,
+                    "operations": [{"block_id": "p_002", "action": "keep", "replacement": ""}],
+                },
+            )
+
+    def test_replacement_cannot_inject_new_markdown_blocks_or_html(self) -> None:
+        manifest = ARTICLE_EDITOR.build_manifest(self.ARTICLE)
+        for replacement in ("Новый абзац.\n\n## Чужой раздел", "<script>alert(1)</script>"):
+            with self.subTest(replacement=replacement):
+                with self.assertRaisesRegex(ValueError, "replacement"):
+                    ARTICLE_EDITOR.validate_patch(
+                        manifest,
+                        ["p_002"],
+                        {
+                            "article_version": 1,
+                            "operations": [
+                                {"block_id": "p_002", "action": "replace", "replacement": replacement}
+                            ],
+                        },
+                    )
+
+    def test_gemini_request_uses_strict_schema_and_full_style_context(self) -> None:
+        manifest = ARTICLE_EDITOR.build_manifest(self.ARTICLE)
+        payload = ARTICLE_EDITOR.build_gemini_payload(
+            self.ARTICLE,
+            manifest,
+            ["p_002", "p_003"],
+            "Второй оставь, третий сократи.",
+            "google/gemini-2.5-pro",
+        )
+        self.assertEqual(payload["response_format"]["type"], "json_schema")
+        self.assertTrue(payload["response_format"]["json_schema"]["strict"])
+        self.assertTrue(payload["provider"]["require_parameters"])
+        prompt = payload["messages"][0]["content"]
+        self.assertIn(self.ARTICLE.strip(), prompt)
+        self.assertIn("p_002", prompt)
+        self.assertIn("Второй оставь, третий сократи", prompt)
+
+    def test_editor_html_has_fixed_numbers_and_never_uses_inner_html(self) -> None:
+        manifest = ARTICLE_EDITOR.build_manifest(self.ARTICLE)
+        rendered = ARTICLE_RENDERER.render_html(
+            self.ARTICLE,
+            editor={
+                "run_key": "run123",
+                "article_version": 1,
+                "api_url": "/roadmap-telegram/article-selection",
+                "blocks": manifest["blocks"],
+            },
+        )
+        self.assertIn('data-block-id="p_001"', rendered)
+        self.assertIn('data-block-id="p_003"', rendered)
+        self.assertIn('class="edit-number">1<', rendered)
+        self.assertIn('class="edit-number">3<', rendered)
+        self.assertIn("window.Telegram && window.Telegram.WebApp", rendered)
+        self.assertIn("telegram.initData", rendered)
+        self.assertNotIn("innerHTML", rendered)
+
+
+class ArticleSelectionSecurityTests(unittest.TestCase):
+    def signed_init_data(self, token: str, user_id: int, auth_date: int) -> str:
+        values = {
+            "auth_date": str(auth_date),
+            "query_id": "query-1",
+            "user": json.dumps({"id": user_id, "first_name": "Teacher"}, separators=(",", ":")),
+        }
+        check_string = "\n".join(f"{key}={values[key]}" for key in sorted(values))
+        secret = hmac.new(b"WebAppData", token.encode("utf-8"), hashlib.sha256).digest()
+        values["hash"] = hmac.new(secret, check_string.encode("utf-8"), hashlib.sha256).hexdigest()
+        return urllib.parse.urlencode(values)
+
+    def test_signed_webapp_data_returns_verified_teacher_id(self) -> None:
+        now = 1_800_000_000
+        init_data = self.signed_init_data("bot-token", 42, now - 10)
+        self.assertEqual(
+            WEBHOOK.validate_telegram_webapp_init_data(init_data, "bot-token", now=now),
+            "42",
+        )
+
+    def test_webapp_data_rejects_bad_signature_and_expired_request(self) -> None:
+        now = 1_800_000_000
+        valid = self.signed_init_data("bot-token", 42, now - 10)
+        with self.assertRaisesRegex(ValueError, "signature"):
+            WEBHOOK.validate_telegram_webapp_init_data(valid, "other-token", now=now)
+        expired = self.signed_init_data("bot-token", 42, now - 86_401)
+        with self.assertRaisesRegex(ValueError, "expired"):
+            WEBHOOK.validate_telegram_webapp_init_data(expired, "bot-token", now=now)
+
+    def test_selection_is_bound_to_owner_current_version_and_known_blocks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "run"
+            run_dir.mkdir()
+            manifest = ARTICLE_EDITOR.build_manifest("# Title\n\nOne.\n\nTwo.\n")
+            (run_dir / "roadmap-article-blocks.json").write_text(
+                json.dumps(manifest), encoding="utf-8"
+            )
+            registry = {
+                "runs": {
+                    "run123": {"run_dir": str(run_dir), "audio": "lesson.m4a", "chat_id": "42"}
+                }
+            }
+
+            selected = WEBHOOK.update_article_selection(
+                registry,
+                teacher_id="42",
+                run_key="run123",
+                article_version=1,
+                selected_block_ids=["p_002"],
+                action="set",
+                now="2026-08-26T12:00:00Z",
+            )
+            self.assertEqual(selected, ["p_002"])
+            self.assertEqual(registry["pending_article_edits"]["42"]["selected_block_ids"], ["p_002"])
+
+            with self.assertRaisesRegex(PermissionError, "owner"):
+                WEBHOOK.update_article_selection(
+                    registry, "99", "run123", 1, ["p_001"], "set", "now"
+                )
+            with self.assertRaisesRegex(ValueError, "version"):
+                WEBHOOK.update_article_selection(
+                    registry, "42", "run123", 2, ["p_001"], "set", "now"
+                )
+            with self.assertRaisesRegex(ValueError, "block"):
+                WEBHOOK.update_article_selection(
+                    registry, "42", "run123", 1, ["p_999"], "set", "now"
+                )
+
+    def test_get_selection_does_not_mutate_and_empty_set_clears_pending(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "run"
+            run_dir.mkdir()
+            manifest = ARTICLE_EDITOR.build_manifest("# Title\n\nOne.\n")
+            (run_dir / "roadmap-article-blocks.json").write_text(json.dumps(manifest), encoding="utf-8")
+            registry = {
+                "runs": {"run123": {"run_dir": str(run_dir), "chat_id": "42"}},
+                "pending_article_edits": {
+                    "42": {
+                        "run_key": "run123",
+                        "article_version": 1,
+                        "selected_block_ids": ["p_001"],
+                    }
+                },
+            }
+            selected = WEBHOOK.update_article_selection(
+                registry, "42", "run123", 1, [], "get", "now"
+            )
+            self.assertEqual(selected, ["p_001"])
+            WEBHOOK.update_article_selection(registry, "42", "run123", 1, [], "set", "now")
+            self.assertNotIn("42", registry["pending_article_edits"])
+
+
+class ArticleEditWorkerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.run_dir = self.root / "run"
+        self.run_dir.mkdir()
+        self.article = self.run_dir / "roadmap-article.md"
+        self.article.write_text("# Roadmap\n\nПервый абзац.\n\nВторой абзац.\n", encoding="utf-8")
+        self.manifest = ARTICLE_EDITOR.build_manifest(self.article.read_text(encoding="utf-8"))
+        (self.run_dir / "roadmap-article-blocks.json").write_text(
+            json.dumps(self.manifest, ensure_ascii=False), encoding="utf-8"
+        )
+        (self.run_dir / "status.json").write_text(
+            json.dumps({"article_status": "done", "telegram_chat_id": "42"}), encoding="utf-8"
+        )
+        self.job = self.run_dir / "article-edit-jobs" / "job-101.json"
+        self.job.parent.mkdir()
+        self.job.write_text(json.dumps({
+            "job_id": "job-101",
+            "status": "queued",
+            "run_key": "run123",
+            "run_dir": str(self.run_dir),
+            "audio": "lesson.m4a",
+            "chat_id": "42",
+            "article_version": 1,
+            "selected_block_ids": ["p_002"],
+            "instruction": "Второй абзац сократи.",
+        }, ensure_ascii=False), encoding="utf-8")
+        self.commands: list[list[str]] = []
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def fake_run(self, command: list[str], **_kwargs: object):
+        self.commands.append(command)
+        if command[0] == "renderer":
+            output = Path(command[command.index("-o") + 1])
+            output.write_text("<html><body>article</body></html>" * 10, encoding="utf-8")
+        elif command[0] == "wkhtmltopdf":
+            Path(command[-1]).write_bytes(b"%PDF" + b"x" * 300)
+        return subprocess.CompletedProcess(command, 0)
+
+    def valid_patch(self) -> dict[str, object]:
+        return {
+            "article_version": 1,
+            "operations": [{
+                "block_id": "p_002",
+                "action": "replace",
+                "replacement": "Второй абзац стал короче.",
+            }],
+        }
+
+    def test_worker_stages_new_version_and_notifies_once(self) -> None:
+        calls: list[dict[str, object]] = []
+
+        def model_request(payload: dict[str, object], _api_key: str) -> dict[str, object]:
+            calls.append(payload)
+            return self.valid_patch()
+
+        result = ARTICLE_EDITOR.process_edit_job(
+            self.job,
+            env={"OPENROUTER_API_KEY": "secret", "ARTICLE_EDIT_MODEL": "google/gemini-2.5-pro"},
+            model_request=model_request,
+            run_command=self.fake_run,
+            renderer="renderer",
+            notifier="notifier",
+        )
+
+        self.assertEqual(result, "done")
+        self.assertEqual(len(calls), 1)
+        self.assertIn("Второй абзац стал короче.", self.article.read_text(encoding="utf-8"))
+        next_manifest = json.loads((self.run_dir / "roadmap-article-blocks.json").read_text(encoding="utf-8"))
+        self.assertEqual(next_manifest["article_version"], 2)
+        self.assertTrue((self.run_dir / "article-versions" / "v1" / "roadmap-article.md").exists())
+        self.assertEqual(len([command for command in self.commands if command[0] == "notifier"]), 1)
+        saved_job = json.loads(self.job.read_text(encoding="utf-8"))
+        self.assertEqual(saved_job["status"], "done")
+
+    def test_invalid_first_patch_is_retried_once(self) -> None:
+        responses = [
+            {"article_version": 1, "operations": []},
+            self.valid_patch(),
+        ]
+        result = ARTICLE_EDITOR.process_edit_job(
+            self.job,
+            env={"OPENROUTER_API_KEY": "secret"},
+            model_request=lambda _payload, _key: responses.pop(0),
+            run_command=self.fake_run,
+            renderer="renderer",
+            notifier="notifier",
+        )
+        self.assertEqual(result, "done")
+        self.assertEqual(responses, [])
+
+    def test_unparseable_first_response_is_retried_once(self) -> None:
+        calls = 0
+
+        def model_request(_payload: dict[str, object], _key: str) -> dict[str, object]:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise ValueError("invalid structured JSON")
+            return self.valid_patch()
+
+        result = ARTICLE_EDITOR.process_edit_job(
+            self.job,
+            env={"OPENROUTER_API_KEY": "secret"},
+            model_request=model_request,
+            run_command=self.fake_run,
+            renderer="renderer",
+            notifier="notifier",
+        )
+        self.assertEqual(result, "done")
+        self.assertEqual(calls, 2)
+
+    def test_two_invalid_patches_leave_current_article_untouched(self) -> None:
+        original = self.article.read_text(encoding="utf-8")
+        with self.assertRaisesRegex(RuntimeError, "Gemini patch validation failed"):
+            ARTICLE_EDITOR.process_edit_job(
+                self.job,
+                env={"OPENROUTER_API_KEY": "secret"},
+                model_request=lambda _payload, _key: {"article_version": 1, "operations": []},
+                run_command=self.fake_run,
+                renderer="renderer",
+                notifier="notifier",
+            )
+        self.assertEqual(self.article.read_text(encoding="utf-8"), original)
+        self.assertEqual(json.loads(self.job.read_text(encoding="utf-8"))["status"], "failed")
+        self.assertFalse(any(command[0] == "notifier" for command in self.commands))
+
+    def test_completed_job_is_idempotent(self) -> None:
+        job = json.loads(self.job.read_text(encoding="utf-8"))
+        job["status"] = "done"
+        self.job.write_text(json.dumps(job), encoding="utf-8")
+        result = ARTICLE_EDITOR.process_edit_job(
+            self.job,
+            env={"OPENROUTER_API_KEY": "secret"},
+            model_request=lambda *_args: self.fail("model must not be called"),
+            run_command=self.fake_run,
+            renderer="renderer",
+            notifier="notifier",
+        )
+        self.assertEqual(result, "already_done")
+        self.assertEqual(self.commands, [])
+
+    def test_worker_failure_notice_is_visible_and_contains_no_instruction(self) -> None:
+        ARTICLE_EDITOR.notify_edit_failure(
+            self.job,
+            {"PIPELINE_ENV_FILE": "/safe/env"},
+            notifier="notifier",
+            run_command=self.fake_run,
+        )
+        command = self.commands[-1]
+        self.assertEqual(command[0], "notifier")
+        self.assertIn("--text", command)
+        text = command[command.index("--text") + 1]
+        self.assertIn("Не смог применить правки", text)
+        self.assertNotIn("Второй абзац сократи", text)
 
 
 class CodexArticleScriptTests(unittest.TestCase):
@@ -676,6 +1082,7 @@ class OpenRouterRoadmapGeneratorTests(unittest.TestCase):
             "generate-verification-with-openrouter",
             "generate-article-with-openrouter",
             "generate-article-with-codex",
+            "roadmap-article-editor",
             "validate-gemini-rewrite",
             "roadmap-pipeline-doctor",
             "consultation_verification_prompt.md",
@@ -690,6 +1097,7 @@ class OpenRouterRoadmapGeneratorTests(unittest.TestCase):
         self.assertIn("TELEGRAM_BOT_TOKEN", doctor)
         self.assertIn("OPENROUTER_API_KEY", doctor)
         self.assertIn("ROADMAP_PUBLIC_BASE_URL", doctor)
+        self.assertIn("roadmap-article-editor", doctor)
         self.assertIn("python3 scripts/roadmap_pipeline_tests.py", workflow)
         self.assertTrue((ROOT / "scripts/bootstrap_ubuntu.sh").exists())
         self.assertTrue((ROOT / "docs/HANDOFF_DEPLOY.md").exists())
@@ -1544,6 +1952,73 @@ class WebhookApprovalTests(TempRunMixin, unittest.TestCase):
         sent_texts = [payload["text"] for method, payload in self.sent if method == "sendMessage"]
         self.assertTrue(any("активной проверки" in text for text in sent_texts))
 
+    def test_voice_with_article_selection_creates_one_edit_job(self) -> None:
+        article = "# Roadmap\n\nПервый абзац.\n\nВторой абзац.\n"
+        (self.run_dir / "roadmap-article.md").write_text(article, encoding="utf-8")
+        manifest = ARTICLE_EDITOR.build_manifest(article)
+        (self.run_dir / "roadmap-article-blocks.json").write_text(
+            json.dumps(manifest), encoding="utf-8"
+        )
+        registry = json.loads(self.registry.read_text(encoding="utf-8"))
+        registry["pending_reviews"] = {}
+        registry["pending_article_edits"] = {
+            "42": {
+                "run_key": "abc123",
+                "run_dir": str(self.run_dir),
+                "audio": "lesson.m4a",
+                "article_version": 1,
+                "selected_block_ids": ["p_002"],
+            }
+        }
+        self.registry.write_text(json.dumps(registry), encoding="utf-8")
+        message = {"message_id": 501, "chat": {"id": 42}, "voice": {"file_id": "voice-file"}}
+
+        with patch.object(WEBHOOK, "correction_text_from_message", return_value=("Второй сократи.", "voice")), \
+            patch.object(WEBHOOK, "start_article_edit_worker_async") as worker_mock:
+            self.handler().handle_message(message)
+            self.handler().handle_message(message)
+
+        worker_mock.assert_called_once()
+        job_path = Path(worker_mock.call_args.args[1])
+        job = json.loads(job_path.read_text(encoding="utf-8"))
+        self.assertEqual(job["article_version"], 1)
+        self.assertEqual(job["selected_block_ids"], ["p_002"])
+        self.assertEqual(job["instruction"], "Второй сократи.")
+        saved_registry = json.loads(self.registry.read_text(encoding="utf-8"))
+        self.assertNotIn("42", saved_registry.get("pending_article_edits", {}))
+        self.assertEqual(self.status()["article_edit_status"], "queued")
+        self.start_mock.assert_not_called()
+        sent_texts = [payload["text"] for method, payload in self.sent if method == "sendMessage"]
+        self.assertTrue(any("выбранным абзацам" in text for text in sent_texts))
+
+    def test_text_with_article_selection_uses_same_edit_flow(self) -> None:
+        article = "# Roadmap\n\nПервый абзац.\n"
+        (self.run_dir / "roadmap-article.md").write_text(article, encoding="utf-8")
+        (self.run_dir / "roadmap-article-blocks.json").write_text(
+            json.dumps(ARTICLE_EDITOR.build_manifest(article)), encoding="utf-8"
+        )
+        registry = json.loads(self.registry.read_text(encoding="utf-8"))
+        registry["pending_reviews"] = {}
+        registry["pending_article_edits"] = {
+            "42": {
+                "run_key": "abc123",
+                "run_dir": str(self.run_dir),
+                "audio": "lesson.m4a",
+                "article_version": 1,
+                "selected_block_ids": ["p_001"],
+            }
+        }
+        self.registry.write_text(json.dumps(registry), encoding="utf-8")
+
+        with patch.object(WEBHOOK, "start_article_edit_worker_async") as worker_mock:
+            self.handler().handle_message({"message_id": 502, "chat": {"id": 42}, "text": "Удалить первый."})
+
+        worker_mock.assert_called_once()
+        job = json.loads(Path(worker_mock.call_args.args[1]).read_text(encoding="utf-8"))
+        self.assertEqual(job["instruction"], "Удалить первый.")
+        self.assertEqual(job["source"], "text")
+        self.start_mock.assert_not_called()
+
     def test_repeated_voice_without_pending_is_silent(self) -> None:
         self.registry.write_text(json.dumps({"runs": {}, "pending_reviews": {}}, ensure_ascii=False), encoding="utf-8")
         message = {
@@ -2317,6 +2792,7 @@ class NotifyFormattingTests(unittest.TestCase):
     def test_article_ready_sends_html_and_pdf(self) -> None:
         sent_texts: list[dict[str, object]] = []
         sent_docs: list[tuple[Path, str | None]] = []
+        commands: list[list[str]] = []
 
         def fake_telegram_request(
             _token: str,
@@ -2347,6 +2823,10 @@ class NotifyFormattingTests(unittest.TestCase):
             pdf.write_text("pdf", encoding="utf-8")
             return pdf
 
+        def fake_run(command: list[str], **_kwargs: object):
+            commands.append(command)
+            return subprocess.CompletedProcess(command, 0)
+
         with patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "token"}, clear=False), \
             patch.object(sys, "argv", [
                 "telegram_roadmap_notify.py",
@@ -2358,13 +2838,15 @@ class NotifyFormattingTests(unittest.TestCase):
                 "Настя а2.m4a",
                 "--run-dir",
                 str(self.run_dir),
+                "--registry-file",
+                str(self.root / "registry.json"),
                 "--public-root",
                 str(self.root / "public"),
             ]), \
             patch.object(NOTIFY, "telegram_request", side_effect=fake_telegram_request), \
             patch.object(NOTIFY, "telegram_multipart_request", side_effect=fake_multipart), \
             patch.object(NOTIFY, "ensure_article_pdf", side_effect=fake_pdf), \
-            patch.object(NOTIFY.subprocess, "run"):
+            patch.object(NOTIFY.subprocess, "run", side_effect=fake_run):
             self.assertEqual(NOTIFY.main(), 0)
 
         self.assertIn("Открой красивую версию", sent_texts[-1]["text"])
@@ -2372,6 +2854,14 @@ class NotifyFormattingTests(unittest.TestCase):
         self.assertEqual(labels, ["Открыть красиво"])
         self.assertEqual([path.name for path, _name in sent_docs], ["roadmap-article.html", "roadmap-article.pdf"])
         self.assertEqual([name for _path, name in sent_docs], ["Настя а2 roadmap.html", "Настя а2 roadmap.pdf"])
+        editor_commands = [
+            command for command in commands
+            if command and command[0].endswith("roadmap-article-editor")
+        ]
+        self.assertEqual(len(editor_commands), 1)
+        self.assertIn("prepare", editor_commands[0])
+        saved_registry = json.loads((self.root / "registry.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(saved_registry["runs"]), 1)
 
     def test_article_recovery_sends_two_choice_buttons(self) -> None:
         sent: list[dict[str, object]] = []
