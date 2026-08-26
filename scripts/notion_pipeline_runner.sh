@@ -30,7 +30,7 @@ LOCAL_STT_LANGUAGE="${LOCAL_STT_LANGUAGE:-ru}"
 TRANSCRIPTION_STALE_AFTER_SEC="${TRANSCRIPTION_STALE_AFTER_SEC:-900}"
 VERIFICATION_SCRIPT="${VERIFICATION_SCRIPT:-/usr/local/bin/generate-verification-with-openrouter}"
 ARTICLE_SCRIPT="${ARTICLE_SCRIPT:-/usr/local/bin/generate-article-with-gemini-rewrite}"
-ARTICLE_DRAFT_SCRIPT="${ARTICLE_DRAFT_SCRIPT:-/usr/local/bin/generate-article-with-openrouter}"
+ARTICLE_DRAFT_SCRIPT="${ARTICLE_DRAFT_SCRIPT:-/usr/local/bin/generate-article-with-codex}"
 export CODEX_ARTICLE_SCRIPT="${CODEX_ARTICLE_SCRIPT:-$ARTICLE_DRAFT_SCRIPT}"
 
 exec 9>"$LOCK_FILE"

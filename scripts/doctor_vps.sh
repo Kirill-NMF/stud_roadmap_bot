@@ -46,6 +46,7 @@ check "python3" require_command python3
 check "ffmpeg" require_command ffmpeg
 check "wkhtmltopdf" require_command wkhtmltopdf
 check "roadmap-markdown-to-html" require_command roadmap-markdown-to-html
+check "codex" require_command codex
 
 for path in \
   /usr/local/bin/notion-pull-audio \
@@ -57,6 +58,7 @@ for path in \
   /usr/local/bin/openrouter-roadmap-generate \
   /usr/local/bin/generate-verification-with-openrouter \
   /usr/local/bin/generate-article-with-openrouter \
+  /usr/local/bin/generate-article-with-codex \
   /usr/local/bin/generate-article-with-gemini-rewrite \
   /usr/local/bin/validate-gemini-rewrite \
   /usr/local/bin/openrouter-gemini-chat-chain; do

@@ -151,6 +151,114 @@ class PromptRuleTests(unittest.TestCase):
         self.assertIn("как обучение связано с интересами ученика", prompt)
         self.assertNotIn("считай это внутренней деталью согласования", prompt)
 
+    def test_article_prompt_shortens_only_the_roadmap_table(self) -> None:
+        prompt = (ROOT / "scripts/consultation_article_prompt.md").read_text(encoding="utf-8")
+        self.assertIn("сократи объём текста примерно на 60%", prompt)
+        self.assertIn("Только для таблицы", prompt)
+        self.assertIn("Не сокращай остальные разделы", prompt)
+        self.assertIn("одно короткое предложение", prompt)
+        self.assertIn("не более 2-3 кратких действий", prompt)
+
+
+class CodexArticleScriptTests(unittest.TestCase):
+    def test_codex_article_wrapper_has_terra_retry_and_fallback_contract(self) -> None:
+        script = (ROOT / "scripts/generate_article_with_codex.sh").read_text(encoding="utf-8")
+        self.assertIn('CODEX_ARTICLE_MODEL:-gpt-5.6-terra', script)
+        self.assertIn('CODEX_ARTICLE_REASONING_EFFORT:-high', script)
+        self.assertIn('CODEX_ARTICLE_ATTEMPTS:-3', script)
+        self.assertIn('CODEX_ARTICLE_FALLBACK_SCRIPT:-/usr/local/bin/generate-article-with-openrouter', script)
+        self.assertIn('model_reasoning_effort=', script)
+        self.assertIn('article_generation_provider', script)
+        self.assertIn('article_codex_attempts', script)
+        self.assertIn('article_fallback_reason', script)
+        self.assertIn('mktemp', script)
+        self.assertIn('< "$PROMPT"', script)
+
+    @unittest.skipUnless(Path("/bin/bash").exists(), "requires a POSIX shell")
+    def test_codex_success_does_not_call_openrouter_fallback(self) -> None:
+        result, status, calls, fallback_called = self._run_wrapper(fail_codex=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(calls), 1)
+        self.assertIn("gpt-5.6-terra", calls[0])
+        self.assertIn('model_reasoning_effort="high"', calls[0])
+        self.assertFalse(fallback_called)
+        self.assertEqual(status["article_generation_provider"], "codex_cli")
+        self.assertEqual(status["article_codex_attempts"], 1)
+        self.assertNotIn("article_fallback_reason", status)
+
+    @unittest.skipUnless(Path("/bin/bash").exists(), "requires a POSIX shell")
+    def test_three_codex_failures_call_openrouter_once(self) -> None:
+        result, status, calls, fallback_called = self._run_wrapper(fail_codex=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(calls), 3)
+        self.assertTrue(fallback_called)
+        self.assertEqual(status["article_generation_provider"], "openrouter_fallback")
+        self.assertEqual(status["article_codex_attempts"], 3)
+        self.assertEqual(status["article_fallback_reason"], "codex_cli_failed_after_3_attempts")
+
+    def _run_wrapper(self, *, fail_codex: bool) -> tuple[subprocess.CompletedProcess[str], dict[str, object], list[list[str]], bool]:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "run"
+            bin_dir = root / "bin"
+            run_dir.mkdir()
+            bin_dir.mkdir()
+            (run_dir / "transcript.md").write_text("Транскрипт", encoding="utf-8")
+            (run_dir / "verification.md").write_text("Проверка", encoding="utf-8")
+            (run_dir / "status.json").write_text("{}", encoding="utf-8")
+            prompt = root / "prompt.md"
+            enhancements = root / "enhancements.md"
+            prompt.write_text("Шаблон", encoding="utf-8")
+            enhancements.write_text("P1", encoding="utf-8")
+            calls_path = root / "codex-calls.jsonl"
+            fallback_marker = root / "fallback-called"
+
+            fake_codex = bin_dir / "codex"
+            fake_codex.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json, os, pathlib, sys\n"
+                "calls = pathlib.Path(os.environ['FAKE_CODEX_CALLS'])\n"
+                "with calls.open('a', encoding='utf-8') as handle:\n"
+                "    handle.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+                "if os.environ.get('FAKE_CODEX_FAIL') == '1':\n"
+                "    raise SystemExit(1)\n"
+                "out = pathlib.Path(sys.argv[sys.argv.index('--output-last-message') + 1])\n"
+                "out.write_text('# Имя\\n\\n## Roadmap\\n\\n| Период | Результат | Что делаем |\\n| --- | --- | --- |\\n| 1 месяц | Результат | Практика |\\n\\n' + ('Полезный текст. ' * 40), encoding='utf-8')\n",
+                encoding="utf-8",
+            )
+            fake_codex.chmod(0o755)
+
+            fallback = bin_dir / "fallback"
+            fallback.write_text(
+                "#!/usr/bin/env bash\n"
+                "set -euo pipefail\n"
+                f"touch '{fallback_marker}'\n"
+                "printf '# Fallback\\n\\nOpenRouter article.\\n' > \"$1/roadmap-article.md\"\n",
+                encoding="utf-8",
+            )
+            fallback.chmod(0o755)
+
+            env = os.environ.copy()
+            env.update({
+                "CODEX_BIN": str(fake_codex),
+                "CODEX_ARTICLE_PROMPT": str(prompt),
+                "ROADMAP_ENHANCEMENTS_PROMPT": str(enhancements),
+                "CODEX_ARTICLE_FALLBACK_SCRIPT": str(fallback),
+                "CODEX_ARTICLE_RETRY_DELAY_SECONDS": "0",
+                "ROADMAP_MARKDOWN_TO_HTML": "missing-roadmap-renderer",
+                "FAKE_CODEX_CALLS": str(calls_path),
+                "FAKE_CODEX_FAIL": "1" if fail_codex else "0",
+            })
+            result = subprocess.run(
+                ["/bin/bash", str(ROOT / "scripts/generate_article_with_codex.sh"), str(run_dir)],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+            status = json.loads((run_dir / "status.json").read_text(encoding="utf-8"))
+            calls = [json.loads(line) for line in calls_path.read_text(encoding="utf-8").splitlines()]
+            return result, status, calls, fallback_marker.exists()
+
 
 class TelegramVoiceTranscriptionTests(unittest.TestCase):
     def test_webhook_voice_python_uses_standard_pipeline_runtime_fallback(self) -> None:
@@ -288,13 +396,13 @@ class OpenRouterRoadmapGeneratorTests(unittest.TestCase):
         self.assertNotIn("codex ", verification)
         self.assertNotIn("codex ", article)
 
-    def test_pipeline_runner_is_env_configurable_and_defaults_to_openrouter_generation(self) -> None:
+    def test_pipeline_runner_is_env_configurable_and_defaults_to_codex_generation(self) -> None:
         runner = (ROOT / "scripts/notion_pipeline_runner.sh").read_text(encoding="utf-8")
         self.assertIn("/etc/zoom-audio-pipeline/pipeline.env", runner)
         self.assertIn('telegram-notion-archive-worker --env-file "$ENV_FILE"', runner)
         self.assertIn('notion-pull-audio --env-file "$ENV_FILE"', runner)
         self.assertIn("VERIFICATION_SCRIPT:-/usr/local/bin/generate-verification-with-openrouter", runner)
-        self.assertIn("ARTICLE_DRAFT_SCRIPT:-/usr/local/bin/generate-article-with-openrouter", runner)
+        self.assertIn("ARTICLE_DRAFT_SCRIPT:-/usr/local/bin/generate-article-with-codex", runner)
         self.assertIn('LOCAL_STT_MODEL="${LOCAL_STT_MODEL:-tiny}"', runner)
         self.assertIn('--model "$LOCAL_STT_MODEL"', runner)
         self.assertIn('--device "$LOCAL_STT_DEVICE"', runner)
@@ -317,6 +425,7 @@ class OpenRouterRoadmapGeneratorTests(unittest.TestCase):
             "openrouter-roadmap-generate",
             "generate-verification-with-openrouter",
             "generate-article-with-openrouter",
+            "generate-article-with-codex",
             "validate-gemini-rewrite",
             "roadmap-pipeline-doctor",
             "consultation_verification_prompt.md",
