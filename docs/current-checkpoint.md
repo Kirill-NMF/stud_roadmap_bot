@@ -149,6 +149,15 @@ Latest deployed article routing (2026-08-26):
   `roadmap-pipeline-doctor`, source/runtime hash match, Codex login status, and a
   small real `gpt-5.6-terra` high-reasoning model probe.
 
+Pending Codex latency policy (2026-08-26):
+
+- Historical VPS logs show normal Codex CLI article runs completing in
+  `36-63` seconds. The two runs containing `Reconnecting... 2/5` took
+  approximately `649` and `663` seconds, independent of model and prompt size.
+- The selected policy is two Codex CLI attempts with an `80` second timeout per
+  attempt and the existing `3` second retry delay. After the second failure,
+  generation falls back once to the existing OpenRouter article wrapper.
+
 Latest deployed recovery (2026-08-26):
 
 - Commits through `921c85c` are deployed on the VPS.

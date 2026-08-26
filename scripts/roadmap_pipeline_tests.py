@@ -165,7 +165,8 @@ class CodexArticleScriptTests(unittest.TestCase):
         script = (ROOT / "scripts/generate_article_with_codex.sh").read_text(encoding="utf-8")
         self.assertIn('CODEX_ARTICLE_MODEL:-gpt-5.6-terra', script)
         self.assertIn('CODEX_ARTICLE_REASONING_EFFORT:-high', script)
-        self.assertIn('CODEX_ARTICLE_ATTEMPTS:-3', script)
+        self.assertIn('CODEX_ARTICLE_ATTEMPTS:-2', script)
+        self.assertIn('CODEX_ARTICLE_TIMEOUT_SECONDS:-80', script)
         self.assertIn('CODEX_ARTICLE_FALLBACK_SCRIPT:-/usr/local/bin/generate-article-with-openrouter', script)
         self.assertIn('model_reasoning_effort=', script)
         self.assertIn('article_generation_provider', script)
@@ -176,7 +177,7 @@ class CodexArticleScriptTests(unittest.TestCase):
 
     @unittest.skipUnless(Path("/bin/bash").exists(), "requires a POSIX shell")
     def test_codex_success_does_not_call_openrouter_fallback(self) -> None:
-        result, status, calls, fallback_called = self._run_wrapper(fail_codex=False)
+        result, status, calls, fallback_called = self._run_wrapper(failures_before_success=0)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(len(calls), 1)
         self.assertIn("gpt-5.6-terra", calls[0])
@@ -187,16 +188,26 @@ class CodexArticleScriptTests(unittest.TestCase):
         self.assertNotIn("article_fallback_reason", status)
 
     @unittest.skipUnless(Path("/bin/bash").exists(), "requires a POSIX shell")
-    def test_three_codex_failures_call_openrouter_once(self) -> None:
-        result, status, calls, fallback_called = self._run_wrapper(fail_codex=True)
+    def test_second_codex_attempt_can_succeed_without_openrouter_fallback(self) -> None:
+        result, status, calls, fallback_called = self._run_wrapper(failures_before_success=1)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(len(calls), 3)
+        self.assertEqual(len(calls), 2)
+        self.assertFalse(fallback_called)
+        self.assertEqual(status["article_generation_provider"], "codex_cli")
+        self.assertEqual(status["article_codex_attempts"], 2)
+        self.assertNotIn("article_fallback_reason", status)
+
+    @unittest.skipUnless(Path("/bin/bash").exists(), "requires a POSIX shell")
+    def test_two_codex_failures_call_openrouter_once(self) -> None:
+        result, status, calls, fallback_called = self._run_wrapper(failures_before_success=2)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(calls), 2)
         self.assertTrue(fallback_called)
         self.assertEqual(status["article_generation_provider"], "openrouter_fallback")
-        self.assertEqual(status["article_codex_attempts"], 3)
-        self.assertEqual(status["article_fallback_reason"], "codex_cli_failed_after_3_attempts")
+        self.assertEqual(status["article_codex_attempts"], 2)
+        self.assertEqual(status["article_fallback_reason"], "codex_cli_failed_after_2_attempts")
 
-    def _run_wrapper(self, *, fail_codex: bool) -> tuple[subprocess.CompletedProcess[str], dict[str, object], list[list[str]], bool]:
+    def _run_wrapper(self, *, failures_before_success: int) -> tuple[subprocess.CompletedProcess[str], dict[str, object], list[list[str]], bool]:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             run_dir = root / "run"
@@ -220,7 +231,8 @@ class CodexArticleScriptTests(unittest.TestCase):
                 "calls = pathlib.Path(os.environ['FAKE_CODEX_CALLS'])\n"
                 "with calls.open('a', encoding='utf-8') as handle:\n"
                 "    handle.write(json.dumps(sys.argv[1:]) + '\\n')\n"
-                "if os.environ.get('FAKE_CODEX_FAIL') == '1':\n"
+                "call_count = len(calls.read_text(encoding='utf-8').splitlines())\n"
+                "if call_count <= int(os.environ.get('FAKE_CODEX_FAILURES_BEFORE_SUCCESS', '0')):\n"
                 "    raise SystemExit(1)\n"
                 "out = pathlib.Path(sys.argv[sys.argv.index('--output-last-message') + 1])\n"
                 "out.write_text('# Имя\\n\\n## Roadmap\\n\\n| Период | Результат | Что делаем |\\n| --- | --- | --- |\\n| 1 месяц | Результат | Практика |\\n\\n' + ('Полезный текст. ' * 40), encoding='utf-8')\n",
@@ -247,7 +259,7 @@ class CodexArticleScriptTests(unittest.TestCase):
                 "CODEX_ARTICLE_RETRY_DELAY_SECONDS": "0",
                 "ROADMAP_MARKDOWN_TO_HTML": "missing-roadmap-renderer",
                 "FAKE_CODEX_CALLS": str(calls_path),
-                "FAKE_CODEX_FAIL": "1" if fail_codex else "0",
+                "FAKE_CODEX_FAILURES_BEFORE_SUCCESS": str(failures_before_success),
             })
             result = subprocess.run(
                 ["/bin/bash", str(ROOT / "scripts/generate_article_with_codex.sh"), str(run_dir)],
