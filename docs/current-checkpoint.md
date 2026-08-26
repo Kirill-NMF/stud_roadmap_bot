@@ -110,30 +110,39 @@ source: telegram
 & 'C:\Users\bests\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' scripts\roadmap_pipeline_tests.py
 ```
 
-Latest clean VPS result: `120/120 OK` on commit `6d9980a`.
+Latest clean VPS result: `122/122 OK` on commit `4f7a1f0`.
 
 Latest deployed final-article editing (2026-08-26):
 
-- Commits `3a161a4` and `6d9980a` are deployed on the VPS.
-- The public final-article reader assigns fixed paragraph IDs and numbers for
-  the current article version. The teacher can select paragraphs and then send
-  one text or voice correction in Telegram.
+- Commits through `4f7a1f0` are deployed on the VPS.
+- The public final-article reader assigns fixed block IDs and numbers for the
+  current article version. The title/introduction and every `##` section are
+  separate selectable blocks; nested headings, lists, and tables stay inside
+  their parent block. The complete Roadmap table is therefore selectable as
+  one block.
+- Block numbers and checkboxes exist only in the Telegram editor page opened by
+  `Посмотреть красиво`. Student HTML/PDF contain no editor controls, numbers,
+  block attributes, or editor-only CSS.
 - Telegram WebApp selection is bound to the signed teacher identity, run owner,
   current article version, and known paragraph IDs. Repeated Telegram updates
   and completed edit jobs are idempotent.
 - Gemini Pro receives the complete article as style context but may return
-  operations only for the selected paragraphs. The server validates the strict
-  JSON patch and merges it deterministically; unselected text and article order
-  remain unchanged.
+  operations only for the selected blocks. A replacement must contain the full
+  selected section and preserve its heading. The server validates the strict
+  JSON patch and merges it deterministically; unselected blocks and article
+  order remain unchanged.
+- Legacy already-open editor pages with paragraph IDs remain accepted during
+  the schema transition; newly prepared pages use block IDs.
 - A successful edit creates a new article version and sends fresh HTML/PDF.
   Invalid model output is retried once and cannot replace the current article.
-- Production gates passed: full `120/120` suite, `roadmap-pipeline-doctor`,
+- Production gates passed: full `122/122` suite, `roadmap-pipeline-doctor`,
   webhook health on `127.0.0.1:8792`, runtime/source byte comparison, unsigned
-  request rejection, release secret scan, and isolated editor/render smoke.
+  request rejection, release secret scan, and isolated block/editor/student
+  render smoke.
 - No real Gemini call or signed Telegram WebApp interaction was used during the
   deployment gate.
 - Production backup before this deployment:
-  `/var/backups/zoom-audio-pipeline/6d9980a-pre-20260826-201838`.
+  `/var/backups/zoom-audio-pipeline/4f7a1f0-pre-20260826-212645`.
 
 Latest deployed Telegram repeat-intake behavior (2026-08-26):
 
