@@ -2149,6 +2149,14 @@ class GeminiRewriteValidatorTests(unittest.TestCase):
         self.assertEqual(report["status"], "warning")
         self.assertTrue(any("3000 рублей" in warning for warning in report["warnings"]))
 
+    def test_equivalent_numeric_range_wording_is_silent(self) -> None:
+        draft = "# Дмитрий\n\n## План\n\nСрок 6–9 месяцев.\n" + ("Подробность. " * 80)
+        final = "# Дмитрий\n\n## План действий\n\nСрок от 6 до 9 месяцев.\n" + ("Подробность. " * 80)
+        result, report = self.run_validator(draft, final)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(report["status"], "ok")
+        self.assertEqual(report["warnings"], [])
+
     def test_truncated_final_requires_recovery_choice(self) -> None:
         draft = "# Дмитрий\n\n## План\n\n" + ("Подробный текст. " * 200)
         final = "# Дмитрий\n\nОборвано."

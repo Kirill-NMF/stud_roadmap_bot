@@ -13,8 +13,17 @@ from typing import Any
 REQUIRED_MARKERS = ["Progress.me", "YouTube", "A0", "A1", "A2", "B1", "B2"]
 P_CODE_PATTERN = re.compile(r"\bP(?:1[0-4]|[1-9])\b")
 HEADING_PATTERN = re.compile(r"^(#{1,6})\s+\S")
+UNIT_PATTERN = (
+    r"%|руб(?:лей|ля|ль)?|месяц(?:а|ев)?|недел(?:я|и|ь)|раз(?:а)?|"
+    r"минут(?:а|ы)?|час(?:а|ов)?|USDT"
+)
+RANGE_PATTERN = re.compile(
+    rf"(?:\bот\s+)?(\d+(?:[.,]\d+)?)\s*(?:[-–—]|\bдо\b)\s*"
+    rf"(\d+(?:[.,]\d+)?)\s*({UNIT_PATTERN})\b",
+    re.IGNORECASE,
+)
 FACT_PATTERN = re.compile(
-    r"\b\d+(?:[.,]\d+)?(?:\s*[-–—]\s*\d+(?:[.,]\d+)?)?\s*"
+    r"\b\d+(?:[.,]\d+)?\s*"
     r"(?:%|руб(?:лей|ля|ль)?|месяц(?:а|ев)?|недел(?:я|и|ь)|раз(?:а)?|"
     r"минут(?:а|ы)?|час(?:а|ов)?|USDT)\b",
     re.IGNORECASE,
@@ -31,7 +40,16 @@ def heading_levels(markdown: str) -> list[int]:
 
 
 def normalized_facts(markdown: str) -> set[str]:
-    return {re.sub(r"\s+", " ", match.group(0).lower().replace(",", ".")) for match in FACT_PATTERN.finditer(markdown)}
+    facts = {
+        f"{match.group(1).replace(',', '.')}-{match.group(2).replace(',', '.')} {match.group(3).lower()}"
+        for match in RANGE_PATTERN.finditer(markdown)
+    }
+    without_ranges = RANGE_PATTERN.sub(" ", markdown)
+    facts.update(
+        re.sub(r"\s+", " ", match.group(0).lower().replace(",", "."))
+        for match in FACT_PATTERN.finditer(without_ranges)
+    )
+    return facts
 
 
 def classify_rewrite(draft: str, final: str) -> dict[str, Any]:
