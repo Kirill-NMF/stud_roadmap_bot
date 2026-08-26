@@ -38,6 +38,12 @@ runs, and sends one teacher-visible retry notice. A Gemini retry reuses the
 current article draft when it is newer than the teacher notes, so it does not
 repeat the expensive draft-generation stage.
 
+Gemini validation is fail-soft. Harmless heading translations and equivalent
+numeric range wording pass silently. Actionable content differences are sent
+after HTML/PDF as a numbered Telegram warning. Only unusable output (for
+example, a truncated final file or failed HTML render) pauses delivery and
+offers two idempotent buttons: retry only Gemini or receive the saved GPT draft.
+
 Telegram-origin Notion archive pages include a marker:
 
 ```text
@@ -102,20 +108,20 @@ source: telegram
 & 'C:\Users\bests\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' scripts\roadmap_pipeline_tests.py
 ```
 
-Latest known local result: `68/68 OK`.
+Latest known local result: `81/81 OK`.
 
 Latest deployed recovery (2026-08-26):
 
-- Commits `7abe3ea` and `1cec79c` are deployed on the VPS.
+- Commits through `921c85c` are deployed on the VPS.
 - Telegram voice corrections use OpenRouter Whisper Large v3 Turbo with a
   local `small` fallback running from `PIPELINE_PYTHON`.
 - Article-provider failures no longer terminate the poller or block other
   runs; retries use bounded exponential backoff and one Telegram notice.
-- Local and VPS suites both pass `68/68`; `roadmap-pipeline-doctor` passes.
-- The Dmitry recovery run remains safely retryable, but OpenRouter currently
-  returns HTTP 402 for both audio and article requests. The saved teacher note
-  and all run artifacts are retained; the pipeline will resume automatically
-  when provider credit is available.
+- Local and VPS suites both pass `81/81`; `roadmap-pipeline-doctor` passes.
+- The Dmitry recovery reused the existing Gemini final without another model
+  call, passed validation, and delivered HTML/PDF to Telegram.
+- A real Telethon recovery smoke displayed both choice buttons, selected the
+  GPT version, produced HTML/PDF, and delivered them exactly once.
 
 Latest VPS smoke:
 
