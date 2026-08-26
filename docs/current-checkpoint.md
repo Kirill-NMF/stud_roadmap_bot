@@ -163,7 +163,7 @@ Deployed Codex latency policy (2026-08-26):
 - Production backup before this deployment:
   `/var/backups/zoom-audio-pipeline/7e67f31-pre`.
 
-Pending hedged Codex policy (2026-08-26):
+Deployed hedged Codex policy (2026-08-26):
 
 - Keep the primary `gpt-5.6-terra` high-reasoning request alive instead of
   terminating it at 80 seconds.
@@ -172,6 +172,15 @@ Pending hedged Codex policy (2026-08-26):
   fallback in an isolated temporary run directory.
 - The first valid output is committed atomically. All losing process groups are
   terminated, and only the winner can continue to Gemini.
+- Commit `22d003a` is deployed on the VPS. The primary has a 900-second safety
+  cap, the delayed Codex hedge has an 80-second cap, and the OpenRouter fallback
+  has a 900-second cap.
+- The installed wrapper and hedge runner match their repository sources. The
+  full clean VPS suite passes `99/99`, three repeated race-focused runs pass,
+  and `roadmap-pipeline-doctor` is green with the hedge runner included. No real
+  model call was made for these deployment gates.
+- Production backup before this deployment:
+  `/var/backups/zoom-audio-pipeline/22d003a-pre`.
 
 Latest deployed recovery (2026-08-26):
 
