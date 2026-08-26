@@ -241,6 +241,33 @@ Latest VPS smoke:
 - `notion-pull-audio` did not download the Notion archive copy as a second input.
 - Cleanup sync updated the registry to `pipeline_done + uploaded`; no files were deleted because retention had not elapsed.
 
+Latest deployed repeatable final-article editing (2026-08-27):
+
+- Commit `f6c4fd1` is deployed on the VPS.
+- `active_articles` keeps the current final article active after a correction
+  job consumes the one-shot `pending_article_edits` checkbox selection.
+- Every delivered article version updates the active `run_key` and
+  `article_version`, clears the previous selection, and provides a fresh editor
+  page for the next voice or text correction.
+- Voice or text without a fresh selection now asks the teacher to select
+  blocks in the current article. A second correction while an edit job is
+  running is rejected visibly and cannot create a parallel Gemini job.
+- A successfully accepted new audio/document closes the previous article
+  session and clears its selection. Failed or duplicate intake leaves the
+  current article session untouched. Closed and stale editor pages cannot save
+  selections.
+- Existing article pages created before this state field was introduced are
+  recovered once from the same teacher's latest valid run. A closed-state
+  tombstone prevents an older run from being recovered after new intake.
+- Clean Windows archive, clean Linux pre-deploy, and VPS post-deploy suites all
+  pass `129/129`; `12` platform-dependent tests are skipped on Windows only.
+  Webhook health returns `200`, an unsigned article-selection request returns
+  `400`, installed runtime hashes match repository sources, and the service log
+  has no post-restart warnings.
+- No real Telegram message or Gemini call was used for the deployment gate.
+- Production rollback point:
+  `/var/backups/zoom-audio-pipeline/f6c4fd1-pre-20260826-2312`.
+
 ## Next Useful Hardening
 
 - Add focused tests for `process-new-audio` in-progress/idempotency behavior.
