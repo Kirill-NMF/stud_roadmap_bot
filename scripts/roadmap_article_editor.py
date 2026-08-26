@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -22,6 +23,7 @@ BLOCK_LINE_RE = re.compile(r"^(?:#{1,6}\s|[-*+]\s|\d+[.)]\s|>|\||```)")
 HTML_TAG_RE = re.compile(r"<\s*/?\s*[a-zA-Z][^>]*>")
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_MODEL = "google/gemini-2.5-pro"
+ARTICLE_EDIT_LOCK_STALE_SECONDS = 30 * 60
 
 
 def source_hash(markdown: str) -> str:
@@ -317,11 +319,16 @@ def process_edit_job(
     if job.get("status") == "done":
         return "already_done"
     run_dir = Path(str(job.get("run_dir") or ""))
+    status_path = run_dir / "status.json"
     lock_dir = run_dir / ".article-edit.lock"
     try:
         lock_dir.mkdir()
     except FileExistsError as error:
-        raise RuntimeError("another article edit is already running") from error
+        lock_age = time.time() - lock_dir.stat().st_mtime
+        if lock_age <= ARTICLE_EDIT_LOCK_STALE_SECONDS:
+            raise RuntimeError("another article edit is already running") from error
+        lock_dir.rmdir()
+        lock_dir.mkdir()
 
     try:
         job["status"] = "started"
@@ -425,17 +432,17 @@ def process_edit_job(
         next_manifest = build_manifest(updated, previous=manifest)
         write_json_atomic(manifest_path, next_manifest)
 
-        status_path = run_dir / "status.json"
         status = load_json(status_path, {})
         if not isinstance(status, dict):
             status = {}
         status.update({
-            "article_edit_status": "done",
-            "article_edit_done_at": utc_now(),
+            "article_edit_status": "delivery_started",
+            "article_edit_rendered_at": utc_now(),
             "article_edit_job": str(job_path),
             "article_version": next_manifest["article_version"],
             "article_edit_model": model,
         })
+        status.pop("article_edit_done_at", None)
         status.pop("article_edit_last_error", None)
         write_json_atomic(status_path, status)
 
@@ -449,12 +456,27 @@ def process_edit_job(
             "--registry-file", str(job.get("registry_file") or "/var/lib/zoom-audio-pipeline/telegram-run-registry.json"),
         ]
         run_command(notify_command, check=True)
+        status = load_json(status_path, {})
+        if not isinstance(status, dict):
+            status = {}
+        status["article_edit_status"] = "done"
+        status["article_edit_done_at"] = utc_now()
+        status.pop("article_edit_last_error", None)
+        write_json_atomic(status_path, status)
         job["status"] = "done"
         job["done_at"] = utc_now()
         job["result_article_version"] = next_manifest["article_version"]
         write_json_atomic(job_path, job)
         return "done"
     except Exception as error:
+        status = load_json(status_path, {})
+        if not isinstance(status, dict):
+            status = {}
+        status["article_edit_status"] = "failed"
+        status["article_edit_failed_at"] = utc_now()
+        status["article_edit_last_error"] = str(error)[:1000]
+        status.pop("article_edit_done_at", None)
+        write_json_atomic(status_path, status)
         job["status"] = "failed"
         job["failed_at"] = utc_now()
         job["last_error"] = str(error)[:1000]

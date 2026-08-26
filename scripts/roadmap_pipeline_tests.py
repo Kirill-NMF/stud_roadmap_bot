@@ -565,6 +565,42 @@ class ArticleEditWorkerTests(unittest.TestCase):
         self.assertIn("Не смог применить правки", text)
         self.assertNotIn("Второй абзац сократи", text)
 
+    def test_notifier_failure_never_leaves_contradictory_done_status(self) -> None:
+        def failing_notify(command: list[str], **kwargs: object):
+            if command[0] == "notifier":
+                raise subprocess.CalledProcessError(1, command)
+            return self.fake_run(command, **kwargs)
+
+        with self.assertRaises(subprocess.CalledProcessError):
+            ARTICLE_EDITOR.process_edit_job(
+                self.job,
+                env={"OPENROUTER_API_KEY": "secret"},
+                model_request=lambda _payload, _key: self.valid_patch(),
+                run_command=failing_notify,
+                renderer="renderer",
+                notifier="notifier",
+            )
+        status = json.loads((self.run_dir / "status.json").read_text(encoding="utf-8"))
+        self.assertEqual(status["article_edit_status"], "failed")
+        self.assertNotIn("article_edit_done_at", status)
+        self.assertEqual(json.loads(self.job.read_text(encoding="utf-8"))["status"], "failed")
+
+    def test_stale_worker_lock_is_recovered(self) -> None:
+        lock_dir = self.run_dir / ".article-edit.lock"
+        lock_dir.mkdir()
+        old = time.time() - ARTICLE_EDITOR.ARTICLE_EDIT_LOCK_STALE_SECONDS - 10
+        os.utime(lock_dir, (old, old))
+        result = ARTICLE_EDITOR.process_edit_job(
+            self.job,
+            env={"OPENROUTER_API_KEY": "secret"},
+            model_request=lambda _payload, _key: self.valid_patch(),
+            run_command=self.fake_run,
+            renderer="renderer",
+            notifier="notifier",
+        )
+        self.assertEqual(result, "done")
+        self.assertFalse(lock_dir.exists())
+
 
 class CodexArticleScriptTests(unittest.TestCase):
     def test_codex_article_wrapper_has_terra_retry_and_fallback_contract(self) -> None:
