@@ -395,6 +395,10 @@ def build_verification_brief(markdown: str, audio: str) -> str:
         "5. Система обучения, которую важно показать ученику",
         "9. Предлагаемые акценты для продающего смысла",
     ])
+    symbolic_preview = section_body(
+        markdown,
+        "6. Предварительная наглядная структура статьи",
+    )
     risks = first_existing_body(markdown, [
         "7. Риски для формулировок и что лучше не включать",
         "4. Боли, ограничения и риски",
@@ -406,6 +410,14 @@ def build_verification_brief(markdown: str, audio: str) -> str:
     roadmap = extract_roadmap_table(markdown)
     numbered_roadmap = table_to_numbered_cards(roadmap, "2") if roadmap else timeline
     proposals = build_enhancement_suggestions(markdown)
+    symbolic_preview_parts = []
+    if symbolic_preview:
+        symbolic_preview_parts = [
+            "",
+            "## Предварительная схема будущей статьи",
+            "",
+            symbolic_preview,
+        ]
 
     parts = [
         "# Проверка перед статьёй",
@@ -431,6 +443,7 @@ def build_verification_brief(markdown: str, audio: str) -> str:
         "## 5. Какую систему важно показать",
         "",
         join_readable(numbered_bullets(system, "5", 5)) or "5.1. Система обучения не выделена.",
+        *symbolic_preview_parts,
         "",
         "## 6. Что реально нужно уточнить",
         "",

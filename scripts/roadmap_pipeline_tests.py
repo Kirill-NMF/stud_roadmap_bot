@@ -85,6 +85,38 @@ VERIFICATION_MD = """# Проверка
 """
 
 
+SYMBOLIC_VERIFICATION_MD = VERIFICATION_MD + """
+
+## 6. Предварительная наглядная структура статьи
+
+### [1] Весь маршрут в одной цепочке
+
+**A0 → первые диалоги → уверенная речь → B1.**
+
+### [2] Roadmap: 1 → 3 → 6 месяцев
+
+**1 месяц. Цель:** первые ситуации. **Практика:** база. **На выходе:** меньше страха.
+
+### [3] Как занятие превращается в результат
+
+**Тема → диалог → обратная связь → повторение.**
+
+### [4] Что станет получаться
+
+- ✓ поддерживать простой диалог.
+
+### [5] Навык → практическая польза
+
+| Навык | Где поможет |
+| --- | --- |
+| Переспрашивать | Не теряться в разговоре |
+
+### [6] Чек-лист до старта
+
+- □ Выбрать материал.
+"""
+
+
 class TempRunMixin:
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -146,6 +178,16 @@ class TempRunMixin:
 
 
 class PromptRuleTests(unittest.TestCase):
+    def test_verification_prompt_requires_six_symbolic_preview_blocks(self) -> None:
+        prompt = (ROOT / "scripts/consultation_verification_prompt.md").read_text(encoding="utf-8")
+        self.assertIn("## 6. Предварительная наглядная структура статьи", prompt)
+        for number in range(1, 7):
+            self.assertIn(f"### [{number}]", prompt)
+        self.assertIn("Цель", prompt)
+        self.assertIn("Практика", prompt)
+        self.assertIn("На выходе", prompt)
+        self.assertIn("не добавляй в блоки [1]-[6]", prompt)
+
     def test_article_prompt_has_current_approval_and_p_option_rules(self) -> None:
         prompt = (ROOT / "scripts/consultation_article_prompt.md").read_text(encoding="utf-8")
         self.assertIn("считай подтверждёнными все факты", prompt)
@@ -159,12 +201,21 @@ class PromptRuleTests(unittest.TestCase):
         self.assertIn("как обучение связано с интересами ученика", prompt)
         self.assertNotIn("считай это внутренней деталью согласования", prompt)
 
-    def test_article_prompt_shortens_only_the_roadmap_table(self) -> None:
+    def test_article_prompt_transfers_symbolic_verification_without_review_numbers(self) -> None:
         prompt = (ROOT / "scripts/consultation_article_prompt.md").read_text(encoding="utf-8")
-        self.assertIn("сократи объём текста примерно на 60%", prompt)
-        self.assertIn("Только для таблицы", prompt)
+        self.assertIn("Предварительная наглядная структура статьи", prompt)
+        self.assertIn("не показывай служебные номера `[1]`-`[6]`", prompt)
+        self.assertIn("Весь маршрут в одной цепочке", prompt)
+        self.assertIn("Навык → практическая польза", prompt)
+
+    def test_article_prompt_keeps_the_roadmap_compact_and_vertical(self) -> None:
+        prompt = (ROOT / "scripts/consultation_article_prompt.md").read_text(encoding="utf-8")
+        self.assertIn("вертикальными этапами", prompt)
+        self.assertIn("**Цель:**", prompt)
+        self.assertIn("**Практика:**", prompt)
+        self.assertIn("**На выходе:**", prompt)
         self.assertIn("Не сокращай остальные разделы", prompt)
-        self.assertIn("одно короткое предложение", prompt)
+        self.assertNotIn("Только для таблицы", prompt)
         self.assertIn("не более 2-3 кратких действий", prompt)
 
 
@@ -3149,6 +3200,22 @@ class NotifyFormattingTests(unittest.TestCase):
         self.assertIn("правку голосом или текстом", brief)
         self.assertNotIn("нажми «Подтвердить»", brief)
         self.assertNotIn("нажми «Нужны правки»", brief)
+
+    def test_verification_brief_preserves_all_symbolic_preview_blocks(self) -> None:
+        brief = NOTIFY.build_verification_brief(SYMBOLIC_VERIFICATION_MD, "lesson.m4a")
+        self.assertIn("## Предварительная схема будущей статьи", brief)
+        for number in range(1, 7):
+            self.assertEqual(brief.count(f"### [{number}]"), 1)
+        self.assertIn("A0 → первые диалоги → уверенная речь → B1", brief)
+        self.assertIn("- ✓ поддерживать простой диалог", brief)
+        self.assertIn("| Переспрашивать | Не теряться в разговоре |", brief)
+        self.assertIn("- □ Выбрать материал", brief)
+
+    def test_legacy_verification_without_symbolic_preview_still_renders(self) -> None:
+        brief = NOTIFY.build_verification_brief(VERIFICATION_MD, "lesson.m4a")
+        self.assertIn("## 2. Сроки и результаты из созвона", brief)
+        self.assertIn("2.1. 1 месяц", brief)
+        self.assertNotIn("## Предварительная схема будущей статьи", brief)
 
     def test_pdf_options_are_split_into_existing_and_optional(self) -> None:
         markdown = VERIFICATION_MD + """
