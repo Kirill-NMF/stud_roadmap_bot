@@ -268,6 +268,33 @@ Latest deployed repeatable final-article editing (2026-08-27):
 - Production rollback point:
   `/var/backups/zoom-audio-pipeline/f6c4fd1-pre-20260826-2312`.
 
+Latest deployed visual verification structure (2026-08-28):
+
+- Commit `38d9811` is deployed on the VPS.
+- New verification documents contain six teacher-review blocks with stable
+  bracket numbers: route chain, vertical roadmap, lesson-to-result chain,
+  expected-results checklist, skill-to-benefit table, and pre-start checklist.
+- The verification reader preserves those blocks verbatim under
+  `Предварительная схема будущей статьи`. Legacy verification documents without
+  the new section still render through the previous compatible path.
+- The six blocks use only facts and careful interpretations from the call.
+  Optional PDF-bank ideas remain excluded unless they were discussed in the
+  call or explicitly approved by code.
+- The GPT article prompt treats the reviewed structure and numbered teacher
+  corrections as binding input, but removes service numbers `[1]`-`[6]` from
+  the student-facing article.
+- This supersedes the earlier wide `Roadmap` table rule. Roadmap stages are now
+  vertical and compact, with `Цель`, `Практика`, and `На выходе`; detailed
+  lesson-system sections are not shortened.
+- Clean Windows and VPS suites pass `133/133`; `12` POSIX-only tests are skipped
+  on Windows. Runtime/source hashes match, all three related services are
+  active, webhook health returns `200`, and an unsigned article-selection
+  request returns `400`.
+- No real Telegram message, model call, or Notion mutation was used for this
+  deployment gate because intake/callback behavior did not change.
+- Production rollback point:
+  `/var/backups/zoom-audio-pipeline/38d9811-pre-20260828`.
+
 ## Next Useful Hardening
 
 - Add focused tests for `process-new-audio` in-progress/idempotency behavior.
