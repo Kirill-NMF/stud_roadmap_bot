@@ -391,6 +391,23 @@ class ArticleEditingContractTests(unittest.TestCase):
         self.assertEqual([block["number"] for block in next_manifest["blocks"]], [1])
         self.assertEqual([block["id"] for block in next_manifest["blocks"]], ["b_001"])
 
+    def test_multi_block_keep_and_delete_remain_deterministic(self) -> None:
+        manifest = ARTICLE_EDITOR.build_manifest(self.ARTICLE)
+        updated = ARTICLE_EDITOR.apply_validated_patch(
+            self.ARTICLE,
+            manifest,
+            ["b_001", "b_002"],
+            {
+                "article_version": 1,
+                "operations": [
+                    {"block_id": "b_001", "action": "keep", "replacement": ""},
+                    {"block_id": "b_002", "action": "delete", "replacement": ""},
+                ],
+            },
+        )
+        self.assertIn("# Roadmap", updated)
+        self.assertNotIn("## Текущая точка", updated)
+
     def test_patch_requires_exact_selected_set_and_current_version(self) -> None:
         manifest = ARTICLE_EDITOR.build_manifest(self.ARTICLE)
         with self.assertRaisesRegex(ValueError, "selected block set"):
@@ -412,10 +429,35 @@ class ArticleEditingContractTests(unittest.TestCase):
                 },
             )
 
+    def test_section_replacement_reattaches_immutable_heading(self) -> None:
+        manifest = ARTICLE_EDITOR.build_manifest(self.ARTICLE)
+        for replacement in (
+            "Новый текст без заголовка.",
+            "## Другой заголовок\n\nНовый текст.",
+            "## Текущая точка\n\nНовый текст с исходным заголовком.",
+        ):
+            with self.subTest(replacement=replacement):
+                updated = ARTICLE_EDITOR.apply_validated_patch(
+                    self.ARTICLE,
+                    manifest,
+                    ["b_002"],
+                    {
+                        "article_version": 1,
+                        "operations": [{
+                            "block_id": "b_002",
+                            "action": "replace",
+                            "replacement": replacement,
+                        }],
+                    },
+                )
+                self.assertEqual(updated.count("## Текущая точка"), 1)
+                self.assertNotIn("## Другой заголовок", updated)
+                self.assertIn("Новый текст", updated)
+
     def test_replacement_cannot_inject_new_markdown_blocks_or_html(self) -> None:
         manifest = ARTICLE_EDITOR.build_manifest(self.ARTICLE)
         for replacement in (
-            "Новый текст без исходного заголовка.",
+            "Новый текст.\n\n## Чужой раздел",
             "## Текущая точка\n\nТекст.\n\n## Чужой раздел",
             "## Текущая точка\n\n<script>alert(1)</script>",
         ):
@@ -447,7 +489,8 @@ class ArticleEditingContractTests(unittest.TestCase):
         prompt = payload["messages"][0]["content"]
         self.assertIn(self.ARTICLE.strip(), prompt)
         self.assertIn("b_002", prompt)
-        self.assertIn("полный Markdown", prompt)
+        self.assertIn("только тело раздела", prompt)
+        self.assertIn("заголовок вернёт сервер", prompt)
         self.assertIn("Второй оставь, третий сократи", prompt)
 
     def test_editor_html_has_fixed_numbers_and_never_uses_inner_html(self) -> None:
@@ -663,7 +706,7 @@ class ArticleEditWorkerTests(unittest.TestCase):
             "operations": [{
                 "block_id": "b_002",
                 "action": "replace",
-                "replacement": "## Второй блок\n\nВторой абзац стал короче.",
+                "replacement": "Второй абзац стал короче.",
             }],
         }
 
@@ -685,6 +728,7 @@ class ArticleEditWorkerTests(unittest.TestCase):
 
         self.assertEqual(result, "done")
         self.assertEqual(len(calls), 1)
+        self.assertEqual(self.article.read_text(encoding="utf-8").count("## Второй блок"), 1)
         self.assertIn("Второй абзац стал короче.", self.article.read_text(encoding="utf-8"))
         next_manifest = json.loads((self.run_dir / "roadmap-article-blocks.json").read_text(encoding="utf-8"))
         self.assertEqual(next_manifest["article_version"], 2)
@@ -708,6 +752,40 @@ class ArticleEditWorkerTests(unittest.TestCase):
         )
         self.assertEqual(result, "done")
         self.assertEqual(responses, [])
+
+    def test_retry_names_validation_error_and_records_safe_diagnostics(self) -> None:
+        payloads: list[dict[str, object]] = []
+
+        def model_request(payload: dict[str, object], _api_key: str) -> dict[str, object]:
+            payloads.append(payload)
+            return {
+                "article_version": 1,
+                "operations": [{
+                    "block_id": "b_002",
+                    "action": "replace",
+                    "replacement": "Новый текст.\n\n## Чужой раздел",
+                }],
+            }
+
+        with self.assertRaisesRegex(RuntimeError, "Gemini patch validation failed"):
+            ARTICLE_EDITOR.process_edit_job(
+                self.job,
+                env={"OPENROUTER_API_KEY": "secret"},
+                model_request=model_request,
+                run_command=self.fake_run,
+                renderer="renderer",
+                notifier="notifier",
+            )
+
+        retry_prompt = payloads[1]["messages"][-1]["content"]
+        self.assertIn("replacement cannot add a sibling block", retry_prompt)
+        diagnostics = json.loads(
+            (self.job.parent / self.job.stem / "validation-attempts.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual([item["attempt"] for item in diagnostics], [1, 2])
+        self.assertEqual(diagnostics[0]["error_code"], "sibling_block")
+        self.assertEqual(diagnostics[0]["block_id"], "b_002")
+        self.assertNotIn("Второй абзац сократи", json.dumps(diagnostics, ensure_ascii=False))
 
     def test_unparseable_first_response_is_retried_once(self) -> None:
         calls = 0

@@ -120,12 +120,15 @@ def validate_replacement(value: Any, block: dict[str, Any]) -> str:
     heading_level = int(block.get("heading_level") or 0)
     heading_markdown = str(block.get("heading_markdown") or "")
     if heading_level:
-        if not lines or lines[0].strip() != heading_markdown:
-            raise ValueError("replacement must preserve the block heading")
-        for line in lines[1:]:
+        first_heading = HEADING_RE.match(lines[0].strip()) if lines else None
+        if first_heading and len(first_heading.group(1)) <= heading_level:
+            lines = lines[1:]
+        body = "\n".join(lines).strip()
+        for line in body.splitlines():
             match = HEADING_RE.match(line.strip())
             if match and len(match.group(1)) <= heading_level:
                 raise ValueError("replacement cannot add a sibling block")
+        return heading_markdown + (f"\n\n{body}" if body else "")
     elif any(
         (match := HEADING_RE.match(line.strip())) and len(match.group(1)) <= 2
         for line in lines
@@ -170,7 +173,10 @@ def validate_patch(
             raise ValueError("operation action is invalid")
         replacement = raw.get("replacement")
         if action == "replace":
-            replacement = validate_replacement(replacement, blocks_by_id[block_id])
+            try:
+                replacement = validate_replacement(replacement, blocks_by_id[block_id])
+            except ValueError as error:
+                raise ValueError(f"block {block_id}: {error}") from error
         elif replacement not in ("", None):
             raise ValueError("replacement must be empty for keep/delete")
         else:
@@ -255,6 +261,7 @@ def build_gemini_payload(
             "number": blocks[block_id]["number"],
             "type": blocks[block_id].get("type", "section"),
             "heading": blocks[block_id].get("heading", ""),
+            "heading_markdown": blocks[block_id].get("heading_markdown", ""),
             "original_markdown": blocks[block_id]["text"],
         }
         for block_id in selected_block_ids
@@ -264,7 +271,7 @@ def build_gemini_payload(
 
 Полная статья ниже является контекстом и эталоном стиля. Сохраняй обращение к ученику, спокойный поддерживающий тон, естественную русскую лексику, длину и ритм предложений, терминологию и степень формальности.
 
-Изменять разрешено только перечисленные выбранные блоки. Для каждого выбранного block_id верни ровно одну операцию: keep, replace или delete. Не меняй порядок. Не добавляй факты, сроки, уровни, числа, обещания или договорённости, если голосовая инструкция прямо этого не требует. Делай минимально необходимое изменение. Для блока type=section верни в replacement полный Markdown раздела вместе с исходным заголовком, сохранив его дословно. Внутри section можно сохранять и менять абзацы, списки, таблицы и вложенные подзаголовки; не добавляй соседние разделы уровня # или ##. Для переходного блока type=paragraph replacement должен оставаться одним абзацем. Не используй HTML. Для keep/delete replacement должен быть пустой строкой.
+Изменять разрешено только перечисленные выбранные блоки. Для каждого выбранного block_id верни ровно одну операцию: keep, replace или delete. Не меняй порядок. Не добавляй факты, сроки, уровни, числа, обещания или договорённости, если голосовая инструкция прямо этого не требует. Делай минимально необходимое изменение. Для блока type=section верни в replacement только тело раздела, не повторяя заголовок: исходный заголовок вернёт сервер. Внутри section можно сохранять и менять абзацы, списки, таблицы и вложенные подзаголовки; не добавляй соседние разделы того же или более высокого уровня. Для переходного блока type=paragraph replacement должен оставаться одним абзацем. Не используй HTML. Для keep/delete replacement должен быть пустой строкой.
 
 Версия статьи: {manifest['article_version']}
 
@@ -314,6 +321,26 @@ def write_json_atomic(path: Path, value: Any) -> None:
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def validation_error_diagnostic(attempt: int, error: Exception) -> dict[str, Any]:
+    message = str(error)
+    block_match = re.search(r"\b([bp]_\d{3})\b", message)
+    if "operations must match the selected block set exactly" in message:
+        code = "selected_block_mismatch"
+    elif "sibling block" in message:
+        code = "sibling_block"
+    elif "HTML" in message:
+        code = "html_not_allowed"
+    elif "structured JSON" in message:
+        code = "invalid_structured_json"
+    else:
+        code = "patch_validation_failed"
+    return {
+        "attempt": attempt,
+        "error_code": code,
+        "block_id": block_match.group(1) if block_match else None,
+    }
 
 
 def load_env_file(path: Path) -> dict[str, str]:
@@ -411,14 +438,19 @@ def process_edit_job(
         model = env.get("ARTICLE_EDIT_MODEL") or env.get("GEMINI_REWRITE_MODEL") or DEFAULT_MODEL
         payload = build_gemini_payload(markdown, manifest, [str(value) for value in selected], instruction, model)
 
+        job_dir = job_path.parent / job_path.stem
+        job_dir.mkdir(parents=True, exist_ok=True)
         patch_value: dict[str, Any] | None = None
         validation_error = ""
+        validation_attempts: list[dict[str, Any]] = []
         for attempt in range(1, 3):
             try:
                 candidate = model_request(payload, api_key)
                 validate_patch(manifest, [str(value) for value in selected], candidate)
             except (ValueError, RuntimeError) as error:
                 validation_error = str(error)
+                validation_attempts.append(validation_error_diagnostic(attempt, error))
+                write_json_atomic(job_dir / "validation-attempts.json", validation_attempts)
                 if attempt == 1:
                     payload = dict(payload)
                     payload["messages"] = [
@@ -427,7 +459,9 @@ def process_edit_job(
                             "role": "user",
                             "content": (
                                 "Предыдущий ответ не прошёл JSON/patch-проверку. "
-                                "Верни заново полный набор операций строго по заданной схеме."
+                                f"Ошибка: {validation_error}. "
+                                "Верни заново полный набор операций строго по заданной схеме. "
+                                "Для section в replacement верни только тело раздела без его заголовка."
                             ),
                         },
                     ]
@@ -438,7 +472,6 @@ def process_edit_job(
         if patch_value is None:
             raise RuntimeError(f"Gemini patch validation failed after two attempts: {validation_error}")
 
-        job_dir = job_path.parent / job_path.stem
         stage_dir = job_dir / "staged"
         stage_dir.mkdir(parents=True, exist_ok=True)
         write_json_atomic(job_dir / "gemini-patch.json", patch_value)
