@@ -295,6 +295,23 @@ Latest deployed visual verification structure (2026-08-28):
 - Production rollback point:
   `/var/backups/zoom-audio-pipeline/38d9811-pre-20260828`.
 
+Latest deployed resilient Gemini article edits (2026-10-02):
+
+- Commit `07265f2` is deployed on the VPS.
+- Gemini now returns only the editable body of a selected section. The server
+  deterministically restores the original immutable heading, while remaining
+  backward-compatible with responses that repeat or alter that first heading.
+- HTML and sibling sections remain rejected. Failed validation attempts record
+  only attempt number, stable error code, and block ID; voice instructions and
+  provider responses are not copied into diagnostics.
+- The full Linux suite passes `136/136`; the focused article-edit, selection,
+  security, and fake-delivery suite passes `25/25`. Installed and repository
+  editor hashes match, and the three related services remain active.
+- No real Telegram message, Gemini call, or Notion mutation was used for the
+  deployment gate.
+- Production rollback point:
+  `/usr/local/bin/roadmap-article-editor.rollback-07265f2`.
+
 ## Next Useful Hardening
 
 - Add focused tests for `process-new-audio` in-progress/idempotency behavior.
