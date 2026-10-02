@@ -312,6 +312,23 @@ Latest deployed resilient Gemini article edits (2026-10-02):
 - Production rollback point:
   `/usr/local/bin/roadmap-article-editor.rollback-07265f2`.
 
+Latest deployed repeat-edit cache fix (2026-10-02):
+
+- Commit `58c2e6a` is deployed on the VPS.
+- Every delivered article revision now has a versioned Telegram WebApp URL
+  (`article.html?v=N`). Telegram therefore opens the current editor instead of
+  reusing a cached page whose `article_version` has already become stale.
+- The server still rejects genuinely stale pages, unknown blocks, wrong owners,
+  and selections submitted while an edit is running. No selection API,
+  authentication, article content, or Gemini behavior changed.
+- The clean Linux suite passes `137/137`; the post-deploy Telegram/security
+  suite passes `9/9`. Runtime and repository notifier hashes match, and the
+  webhook plus both pipeline services are active.
+- The current article was redelivered through the normal `article_ready` path
+  with a versioned button. No Gemini call or Notion mutation was used.
+- Production rollback point:
+  `/usr/local/bin/telegram-roadmap-notify.rollback-e0747be`.
+
 ## Next Useful Hardening
 
 - Add focused tests for `process-new-audio` in-progress/idempotency behavior.
