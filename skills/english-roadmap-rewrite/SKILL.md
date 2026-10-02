@@ -80,7 +80,7 @@ For long drafts, avoid fragile shell quoting. Write the source text to a tempora
 If the user references the approved Pro-site result or asks to "закрепить тот вариант", read `references/pro-style-calibration.md` and use its staged chain:
 
 1. exact big strict rewrite prompt from the Gemini window
-2. exact "в стиле Венни Пака" calibration
+2. adult English study buddy calibration
 3. combined exact anglicism calibration
 
 For the first pass, do not send a short prompt. Use the exact large prompt from the reference and paste the full source article after `ИСХОДНЫЙ ТЕКСТ:`. The later passes should stay close to the exact user messages in the reference.

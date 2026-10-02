@@ -188,6 +188,23 @@ class PromptRuleTests(unittest.TestCase):
         self.assertIn("На выходе", prompt)
         self.assertIn("не добавляй в блоки [1]-[6]", prompt)
 
+    def test_verification_prompt_requires_numbered_generation_decisions(self) -> None:
+        prompt = (ROOT / "scripts/consultation_verification_prompt.md").read_text(encoding="utf-8")
+
+        self.assertIn("## 9. Решения перед генерацией", prompt)
+        for topic in (
+            "Этапы Roadmap",
+            "Контент ученика",
+            "Групповой и индивидуальный формат",
+            "Домашняя работа",
+            "Чек-лист до старта",
+            "Уровень и результаты",
+        ):
+            self.assertIn(topic, prompt)
+        self.assertIn("**Из созвона:**", prompt)
+        self.assertIn("**Предложение:**", prompt)
+        self.assertIn("не включается после общего ответа", prompt)
+
     def test_article_prompt_has_current_approval_and_p_option_rules(self) -> None:
         prompt = (ROOT / "scripts/consultation_article_prompt.md").read_text(encoding="utf-8")
         self.assertIn("считай подтверждёнными все факты", prompt)
@@ -199,7 +216,23 @@ class PromptRuleTests(unittest.TestCase):
         self.assertIn("что именно будет происходить на уроке", prompt)
         self.assertIn("какая будет обратная связь", prompt)
         self.assertIn("как обучение связано с интересами ученика", prompt)
+        self.assertIn("Решения перед генерацией", prompt)
+        self.assertIn("подтверждает только решения с меткой `Из созвона`", prompt)
+        self.assertIn("не подтверждает пункты с меткой `Предложение`", prompt)
+        self.assertIn("Не заполняй его догадками про оплату", prompt)
+        self.assertIn("не подставляй карту 1/3/6 месяцев по умолчанию", prompt)
         self.assertNotIn("считай это внутренней деталью согласования", prompt)
+
+    def test_gemini_style_calibration_uses_adult_study_buddy(self) -> None:
+        chain = (
+            ROOT / "skills/english-roadmap-rewrite/scripts/openrouter_gemini_chat_chain.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertNotIn("Венни Пака", chain)
+        self.assertIn("study buddy", chain)
+        self.assertIn("Без иронии", chain)
+        self.assertIn("детских образов", chain)
+        self.assertIn("Структуру и факты не меняй", chain)
 
     def test_article_prompt_transfers_symbolic_verification_without_review_numbers(self) -> None:
         prompt = (ROOT / "scripts/consultation_article_prompt.md").read_text(encoding="utf-8")
@@ -3283,12 +3316,31 @@ class NotifyFormattingTests(unittest.TestCase):
 
     def test_verification_brief_uses_current_next_step_copy(self) -> None:
         brief = NOTIFY.build_verification_brief(VERIFICATION_MD, "lesson.m4a")
-        self.assertIn("## 8. Предложения из PDF-базы", brief)
+        self.assertIn("## 8. Решения перед генерацией", brief)
+        self.assertIn("## 9. Предложения из PDF-базы", brief)
         self.assertIn("уже звучать в созвоне", brief)
         self.assertIn("нажми «Согласен»", brief)
         self.assertIn("правку голосом или текстом", brief)
         self.assertNotIn("нажми «Подтвердить»", brief)
         self.assertNotIn("нажми «Нужны правки»", brief)
+
+    def test_verification_brief_preserves_numbered_generation_decisions(self) -> None:
+        markdown = VERIFICATION_MD + """
+
+## 9. Решения перед генерацией
+
+1. **Из созвона:** Этапы Roadmap — 1, 3 и 6 месяцев. Оставляем ровно три этапа?
+2. **Предложение:** Контент ученика — добавить YouTube только для индивидуального формата?
+3. **Из созвона:** Домашняя работа — повторение и вывод лексики в речь. Формулировка верна?
+"""
+
+        brief = NOTIFY.build_verification_brief(markdown, "lesson.m4a")
+
+        self.assertIn("8.1. **Из созвона:** Этапы Roadmap", brief)
+        self.assertIn("8.2. **Предложение:** Контент ученика", brief)
+        self.assertIn("8.3. **Из созвона:** Домашняя работа", brief)
+        self.assertLess(brief.index("8.1."), brief.index("8.2."))
+        self.assertLess(brief.index("8.2."), brief.index("8.3."))
 
     def test_verification_brief_preserves_all_symbolic_preview_blocks(self) -> None:
         brief = NOTIFY.build_verification_brief(SYMBOLIC_VERIFICATION_MD, "lesson.m4a")
@@ -3314,8 +3366,8 @@ class NotifyFormattingTests(unittest.TestCase):
 - На созвоне уже обсуждали Progress.me, интерактивную платформу и ситуации для путешествий.
 """
         brief = NOTIFY.build_verification_brief(markdown, "lesson.m4a")
-        existing_header = "8.1. Уже есть в созвоне или первичном анализе"
-        optional_header = "8.2. Можно дополнительно усилить roadmap"
+        existing_header = "9.1. Уже есть в созвоне или первичном анализе"
+        optional_header = "9.2. Можно дополнительно усилить roadmap"
         self.assertIn(existing_header, brief)
         self.assertIn(optional_header, brief)
         self.assertIn("P1. **Уже было в созвоне:** Progress.me", brief)

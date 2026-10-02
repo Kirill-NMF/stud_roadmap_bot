@@ -149,13 +149,13 @@ Use this exact first-pass prompt header. After `ИСХОДНЫЙ ТЕКСТ:`, p
 [paste full source article]
 ```
 
-### Pass 2: Venny Pack Style Calibration
+### Pass 2: Study Buddy Style Calibration
 
 ```text
-Перепиши это также, только давай в стиле Венни Пака.
+Перепиши это также, только теперь в стиле друга по английскому — study buddy: тепло, поддерживающе и по-человечески, как взрослый друг, который помогает спокойно разобраться и двигаться дальше. Без иронии, сюсюканья, детских образов и фамильярности. Структуру и факты не меняй.
 ```
 
-Use this as a style direction, not as permission to break facts or structure. If the model becomes too slang-heavy, continue with the anglicism passes below.
+The study buddy is an adult peer, not a cartoon character, motivational coach, or overly familiar friend. Use this as a style direction, not as permission to break facts or structure. If the model becomes too slang-heavy, continue with the anglicism pass below.
 
 ### Pass 3: Anglicism Calibration
 
