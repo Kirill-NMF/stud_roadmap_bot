@@ -329,6 +329,32 @@ Latest deployed repeat-edit cache fix (2026-10-02):
 - Production rollback point:
   `/usr/local/bin/telegram-roadmap-notify.rollback-e0747be`.
 
+Latest deployed study-buddy rewrite and pre-generation decisions (2026-10-02):
+
+- Commit `356202c` is deployed on the VPS.
+- Gemini pass 2 now rewrites in the voice of an adult, supportive English
+  study buddy. It explicitly excludes irony, baby talk, childish imagery, and
+  overfamiliarity while preserving structure and facts.
+- Verification documents now contain six numbered pre-generation decisions:
+  roadmap stages, student content, group versus individual format, homework,
+  pre-start checklist, and level/results.
+- Every decision is marked either `Из созвона` or `Предложение`. A general
+  `Согласен` confirms only facts already discussed during the call; proposals
+  still require explicit teacher approval before article generation.
+- The article prompt uses only confirmed variants for those six decisions. It
+  no longer invents a default 1/3/6-month roadmap or an unconfirmed pre-start
+  checklist.
+- The focused Linux contract suite passes `24/24`; the clean Linux repository
+  suite passes `140/140`. Installed runtime files match repository sources.
+- A real isolated Gemini three-pass smoke preserved the student, destination,
+  timeline, lesson frequency, and A1/A2 levels. Pass 2 and the final article
+  contained none of the rejected Winnie-the-Pooh/childish imagery.
+- Telegram and Notion webhook services plus Local Bot API are active; the
+  Notion poll timer is active. No real Telegram message, Notion mutation, or
+  new audio intake was used for this deployment.
+- Production rollback point:
+  `/var/backups/zoom-audio-pipeline/356202c-pre-20261002`.
+
 ## Next Useful Hardening
 
 - Add focused tests for `process-new-audio` in-progress/idempotency behavior.
