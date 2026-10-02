@@ -355,6 +355,25 @@ Latest deployed study-buddy rewrite and pre-generation decisions (2026-10-02):
 - Production rollback point:
   `/var/backups/zoom-audio-pipeline/356202c-pre-20261002`.
 
+Latest deployed whole-article edit default (2026-10-02):
+
+- Commit `104af45` is deployed on the VPS.
+- A voice or text correction sent while the final article is active now targets
+  the complete current article when no checkboxes are selected. Selecting one
+  or more checkboxes keeps the previous selected-block behavior.
+- Whole-article mode derives every block ID from the server-side manifest for
+  the active article version. Existing owner, version, block-ID, duplicate
+  Telegram update, and concurrent-edit checks remain in force.
+- Jobs and status records include `selection_scope`, so logs distinguish
+  `whole_article` from `selected_blocks` without recording correction text.
+- The clean Windows and Linux suites pass `142/142`; 12 POSIX-only tests are
+  skipped on Windows. Focused post-deploy tests pass `6/6`.
+- Installed runtime matches the repository, public health returns `200`, an
+  unsigned selection request returns `400`, and the Telegram webhook has no
+  post-restart errors. No real Telegram message or Gemini call was used.
+- Production rollback point:
+  `/var/backups/zoom-audio-pipeline/104af45-pre-20261002`.
+
 ## Next Useful Hardening
 
 - Add focused tests for `process-new-audio` in-progress/idempotency behavior.
