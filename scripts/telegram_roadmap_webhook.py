@@ -273,6 +273,44 @@ def update_article_selection(
     return selected
 
 
+def prepare_whole_article_edit(
+    registry: dict[str, Any],
+    teacher_id: str,
+    active_article: dict[str, Any],
+    now: str,
+) -> dict[str, Any]:
+    run_key = str(active_article.get("run_key") or "")
+    article_version = active_article.get("article_version")
+    if not run_key or not isinstance(article_version, int):
+        raise ValueError("active article state is incomplete")
+    run_dir = Path(str(active_article.get("run_dir") or ""))
+    manifest = load_json(run_dir / "roadmap-article-blocks.json", {})
+    if not isinstance(manifest, dict) or manifest.get("article_version") != article_version:
+        raise ValueError("article version is stale")
+    blocks = manifest.get("blocks", [])
+    if not isinstance(blocks, list):
+        raise ValueError("article block manifest is invalid")
+    selected = [
+        str(block.get("id"))
+        for block in blocks
+        if isinstance(block, dict) and block.get("id")
+    ]
+    if not selected or len(selected) > ARTICLE_SELECTION_MAX_BLOCKS:
+        raise ValueError("article block manifest is invalid")
+    update_article_selection(
+        registry,
+        teacher_id,
+        run_key,
+        article_version,
+        selected,
+        "set",
+        now,
+    )
+    pending = registry["pending_article_edits"][str(teacher_id)]
+    pending["selection_scope"] = "whole_article"
+    return pending
+
+
 def telegram_api_base_url(value: str | None = None) -> str:
     return (value or DEFAULT_TELEGRAM_API_BASE_URL).rstrip("/")
 
@@ -421,6 +459,7 @@ def create_article_edit_job(
         "chat_id": str(message.get("chat", {}).get("id") or ""),
         "article_version": int(pending_edit["article_version"]),
         "selected_block_ids": [str(value) for value in pending_edit["selected_block_ids"]],
+        "selection_scope": str(pending_edit.get("selection_scope") or "selected_blocks"),
         "instruction": instruction,
         "source": source,
         "telegram_message_id": message_id,
@@ -437,6 +476,7 @@ def create_article_edit_job(
         "article_edit_requested_at": utc_now(),
         "article_edit_source": source,
         "article_edit_selected_blocks": job["selected_block_ids"],
+        "article_edit_selection_scope": job["selection_scope"],
     })
     save_json(status_path, status)
     return job_path
@@ -1289,18 +1329,76 @@ def make_handler(config: dict[str, str]):
             pending = registry.get("pending_reviews", {}).get(str(chat_id))
             pending_edit = registry.get("pending_article_edits", {}).get(str(chat_id))
             incoming_audio = extract_audio_message(message)
+            has_correction = bool(
+                str(message.get("text", "")).strip()
+                or message.get("voice")
+            )
+            active_article = resolve_active_article(registry, str(chat_id))
+            if (
+                not pending
+                and not isinstance(pending_edit, dict)
+                and isinstance(active_article, dict)
+                and not incoming_audio
+                and has_correction
+            ):
+                if article_edit_in_progress(active_article):
+                    mark_telegram_message_processed(registry, message)
+                    save_json(registry_file, registry)
+                    append_event(events_file, {
+                        "stage": "telegram_article_edit_already_running",
+                        "chat_id": str(chat_id),
+                        "run_dir": str(active_article.get("run_dir") or ""),
+                        "article_version": active_article.get("article_version"),
+                    })
+                    safe_telegram_request(token, "sendMessage", {
+                        "chat_id": chat_id,
+                        "text": (
+                            "Предыдущая правка уже выполняется. Дождись новой версии статьи "
+                            "и отправь следующую правку после её получения."
+                        ),
+                        "disable_web_page_preview": True,
+                    }, api_base_url=api_base_url)
+                    return
+                try:
+                    pending_edit = prepare_whole_article_edit(
+                        registry,
+                        str(chat_id),
+                        active_article,
+                        utc_now(),
+                    )
+                except (PermissionError, ValueError) as error:
+                    mark_telegram_message_processed(registry, message)
+                    save_json(registry_file, registry)
+                    append_event(events_file, {
+                        "stage": "telegram_article_edit_whole_article_rejected",
+                        "chat_id": str(chat_id),
+                        "run_dir": str(active_article.get("run_dir") or ""),
+                        "article_version": active_article.get("article_version"),
+                        "error": type(error).__name__,
+                    })
+                    safe_telegram_request(token, "sendMessage", {
+                        "chat_id": chat_id,
+                        "text": (
+                            "Не смог подготовить актуальную статью к правке. "
+                            "Открой последнюю версию и попробуй ещё раз."
+                        ),
+                        "disable_web_page_preview": True,
+                    }, api_base_url=api_base_url)
+                    return
+                save_json(registry_file, registry)
             if not pending and isinstance(pending_edit, dict) and not incoming_audio:
-                has_correction = bool(
-                    str(message.get("text", "")).strip()
-                    or message.get("voice")
-                )
                 if has_correction:
+                    whole_article = pending_edit.get("selection_scope") == "whole_article"
                     mark_telegram_message_processed(registry, message)
                     save_json(registry_file, registry)
                     if message.get("voice") or message.get("audio") or message.get("document"):
                         safe_telegram_request(token, "sendMessage", {
                             "chat_id": chat_id,
-                            "text": "Голосовое получил. Расшифровываю правки к выбранным блокам.",
+                            "text": (
+                                "Голосовое получил. Расшифровываю правки ко всей статье."
+                                if whole_article
+                                else "Голосовое получил. Расшифровываю правки к выбранным блокам."
+                            ),
                             "disable_web_page_preview": True,
                         }, api_base_url=api_base_url)
                     text, source = correction_text_from_message(
@@ -1312,7 +1410,12 @@ def make_handler(config: dict[str, str]):
                     if not text or (text.startswith("/") and source == "text"):
                         safe_telegram_request(token, "sendMessage", {
                             "chat_id": chat_id,
-                            "text": "Не смог получить текст правки. Выбор блоков сохранён, пришли сообщение ещё раз.",
+                            "text": (
+                                "Не смог получить текст правки. Режим правки всей статьи сохранён, "
+                                "пришли сообщение ещё раз."
+                                if whole_article
+                                else "Не смог получить текст правки. Выбор блоков сохранён, пришли сообщение ещё раз."
+                            ),
                             "disable_web_page_preview": True,
                         }, api_base_url=api_base_url)
                         return
@@ -1333,52 +1436,23 @@ def make_handler(config: dict[str, str]):
                         "job": str(job_path),
                         "article_version": pending_edit["article_version"],
                         "selected_block_ids": pending_edit["selected_block_ids"],
+                        "selection_scope": pending_edit.get("selection_scope", "selected_blocks"),
                         "source": source,
                     })
                     start_article_edit_worker_async(config, job_path)
                     safe_telegram_request(token, "sendMessage", {
                         "chat_id": chat_id,
                         "text": (
-                            "Правки к выбранным блокам приняты. Gemini Pro обновляет статью; "
-                            "пришлю новые HTML и PDF, когда всё будет готово."
+                            (
+                                "Правки ко всей статье приняты. Gemini Pro обновляет статью; "
+                                if whole_article
+                                else "Правки к выбранным блокам приняты. Gemini Pro обновляет статью; "
+                            )
+                            + "пришлю новые HTML и PDF, когда всё будет готово."
                         ),
                         "disable_web_page_preview": True,
                     }, api_base_url=api_base_url)
                     return
-            active_article = resolve_active_article(registry, str(chat_id))
-            if (
-                not pending
-                and not isinstance(pending_edit, dict)
-                and isinstance(active_article, dict)
-                and not incoming_audio
-                and (message.get("voice") or str(message.get("text", "")).strip())
-            ):
-                mark_telegram_message_processed(registry, message)
-                save_json(registry_file, registry)
-                if article_edit_in_progress(active_article):
-                    text = (
-                        "Предыдущая правка уже выполняется. Дождись новой версии статьи, "
-                        "открой её и заново выбери блоки checkbox для следующей правки."
-                    )
-                    stage = "telegram_article_edit_already_running"
-                else:
-                    text = (
-                        "Финальная статья активна. Открой актуальную версию по кнопке "
-                        "«Открыть красиво», выбери нужные блоки checkbox и отправь правку ещё раз."
-                    )
-                    stage = "telegram_article_edit_selection_required"
-                append_event(events_file, {
-                    "stage": stage,
-                    "chat_id": str(chat_id),
-                    "run_dir": str(active_article.get("run_dir") or ""),
-                    "article_version": active_article.get("article_version"),
-                })
-                safe_telegram_request(token, "sendMessage", {
-                    "chat_id": chat_id,
-                    "text": text,
-                    "disable_web_page_preview": True,
-                }, api_base_url=api_base_url)
-                return
             if not pending:
                 if message.get("voice"):
                     mark_telegram_message_processed(registry, message)

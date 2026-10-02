@@ -2347,8 +2347,8 @@ class WebhookApprovalTests(TempRunMixin, unittest.TestCase):
         sent_texts = [payload["text"] for method, payload in self.sent if method == "sendMessage"]
         self.assertTrue(any("выбранным блокам" in text for text in sent_texts))
 
-    def test_active_article_survives_consumed_selection_and_prompts_for_fresh_checkboxes(self) -> None:
-        article = "# Roadmap\n\nПервый блок.\n"
+    def test_active_article_without_fresh_selection_edits_all_blocks(self) -> None:
+        article = "# Roadmap\n\nПервый блок.\n\n## Второй блок\n\nВторой абзац.\n"
         (self.run_dir / "roadmap-article.md").write_text(article, encoding="utf-8")
         manifest = ARTICLE_EDITOR.build_manifest(article)
         (self.run_dir / "roadmap-article-blocks.json").write_text(
@@ -2384,13 +2384,83 @@ class WebhookApprovalTests(TempRunMixin, unittest.TestCase):
             )
             self.handler().handle_message({"message_id": 602, "chat": {"id": 42}, "voice": {"file_id": "v2"}})
 
-        worker_mock.assert_called_once()
+        self.assertEqual(worker_mock.call_count, 2)
+        second_job_path = Path(worker_mock.call_args.args[1])
+        second_job = json.loads(second_job_path.read_text(encoding="utf-8"))
+        self.assertEqual(second_job["selected_block_ids"], ["b_001", "b_002"])
+        self.assertEqual(second_job["selection_scope"], "whole_article")
         saved = json.loads(self.registry.read_text(encoding="utf-8"))
         self.assertEqual(saved["active_articles"]["42"]["run_key"], "abc123")
         self.assertNotIn("42", saved.get("pending_article_edits", {}))
         sent_texts = [payload["text"] for method, payload in self.sent if method == "sendMessage"]
-        self.assertTrue(any("блоки checkbox" in text.lower() for text in sent_texts))
+        self.assertTrue(any("ко всей статье" in text.lower() for text in sent_texts))
         self.assertFalse(any("нет активной проверки" in text.lower() for text in sent_texts))
+
+    def test_text_without_selection_edits_all_blocks_once_for_duplicate_update(self) -> None:
+        article = "# Roadmap\n\nПервый блок.\n\n## Второй блок\n\nВторой абзац.\n"
+        (self.run_dir / "roadmap-article.md").write_text(article, encoding="utf-8")
+        manifest = ARTICLE_EDITOR.build_manifest(article)
+        (self.run_dir / "roadmap-article-blocks.json").write_text(
+            json.dumps(manifest), encoding="utf-8"
+        )
+        registry = json.loads(self.registry.read_text(encoding="utf-8"))
+        registry["pending_reviews"] = {}
+        registry["active_articles"] = {
+            "42": {
+                "status": "active",
+                "run_key": "abc123",
+                "run_dir": str(self.run_dir),
+                "audio": "lesson.m4a",
+                "article_version": 1,
+            }
+        }
+        self.registry.write_text(json.dumps(registry), encoding="utf-8")
+        message = {"message_id": 604, "chat": {"id": 42}, "text": "Убери повторы по всему тексту."}
+
+        with patch.object(WEBHOOK, "start_article_edit_worker_async") as worker_mock:
+            self.handler().handle_message(message)
+            self.handler().handle_message(message)
+
+        worker_mock.assert_called_once()
+        job_path = Path(worker_mock.call_args.args[1])
+        job = json.loads(job_path.read_text(encoding="utf-8"))
+        self.assertEqual(job["selected_block_ids"], ["b_001", "b_002"])
+        self.assertEqual(job["selection_scope"], "whole_article")
+        self.assertEqual(job["source"], "text")
+        self.assertEqual(job["instruction"], "Убери повторы по всему тексту.")
+
+    def test_whole_article_edit_rejects_stale_manifest_without_starting_worker(self) -> None:
+        article = "# Roadmap\n\nПервый блок.\n"
+        (self.run_dir / "roadmap-article.md").write_text(article, encoding="utf-8")
+        manifest = ARTICLE_EDITOR.build_manifest(article)
+        manifest["article_version"] = 2
+        (self.run_dir / "roadmap-article-blocks.json").write_text(
+            json.dumps(manifest), encoding="utf-8"
+        )
+        registry = json.loads(self.registry.read_text(encoding="utf-8"))
+        registry["pending_reviews"] = {}
+        registry["active_articles"] = {
+            "42": {
+                "status": "active",
+                "run_key": "abc123",
+                "run_dir": str(self.run_dir),
+                "audio": "lesson.m4a",
+                "article_version": 1,
+            }
+        }
+        self.registry.write_text(json.dumps(registry), encoding="utf-8")
+
+        with patch.object(WEBHOOK, "start_article_edit_worker_async") as worker_mock:
+            self.handler().handle_message(
+                {"message_id": 605, "chat": {"id": 42}, "voice": {"file_id": "stale"}}
+            )
+
+        worker_mock.assert_not_called()
+        saved = json.loads(self.registry.read_text(encoding="utf-8"))
+        self.assertNotIn("42", saved.get("pending_article_edits", {}))
+        self.assertIn("telegram_article_edit_whole_article_rejected", self.events.read_text(encoding="utf-8"))
+        sent_texts = [payload["text"] for method, payload in self.sent if method == "sendMessage"]
+        self.assertTrue(any("Не смог подготовить актуальную статью" in text for text in sent_texts))
 
     def test_second_voice_during_article_edit_does_not_create_parallel_job(self) -> None:
         registry = json.loads(self.registry.read_text(encoding="utf-8"))
