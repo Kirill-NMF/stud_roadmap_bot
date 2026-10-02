@@ -11,6 +11,7 @@ import os
 import re
 import subprocess
 import sys
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,6 +25,17 @@ DEFAULT_TELEGRAM_API_BASE_URL = "https://api.telegram.org"
 DEFAULT_ARTICLE_EDITOR = "/usr/local/bin/roadmap-article-editor"
 TELEGRAM_MESSAGE_LIMIT = 4096
 VERIFICATION_BRIEF_FILE = "verification-brief.md"
+
+
+def version_public_url(url: str, article_version: int) -> str:
+    parts = urllib.parse.urlsplit(url)
+    query = [
+        (key, value)
+        for key, value in urllib.parse.parse_qsl(parts.query, keep_blank_values=True)
+        if key != "v"
+    ]
+    query.append(("v", str(article_version)))
+    return urllib.parse.urlunsplit(parts._replace(query=urllib.parse.urlencode(query)))
 
 
 def load_env(path: Path) -> dict[str, str]:
@@ -757,13 +769,15 @@ def main() -> int:
             key,
             env.get("ROADMAP_ARTICLE_EDITOR", DEFAULT_ARTICLE_EDITOR),
         )
-        activate_article(
+        article_version = activate_article(
             Path(args.registry_file),
             key,
             args.run_dir,
             args.audio,
             str(chat_id),
         )
+        if public_url:
+            public_url = version_public_url(public_url, article_version)
         text = build_article_message(run_dir, args.audio)
         article_pdf = ensure_article_pdf(run_dir)
         if public_url:

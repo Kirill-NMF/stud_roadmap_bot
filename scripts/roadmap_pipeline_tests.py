@@ -3260,6 +3260,17 @@ class NotifyFormattingTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
+    def test_article_version_url_replaces_only_cache_buster(self) -> None:
+        url = NOTIFY.version_public_url(
+            "https://roadmap.example/article.html?source=telegram&source=bot&v=1#article",
+            4,
+        )
+
+        self.assertEqual(
+            url,
+            "https://roadmap.example/article.html?source=telegram&source=bot&v=4#article",
+        )
+
     def test_verification_message_is_short(self) -> None:
         message = NOTIFY.build_verification_message(self.run_dir, "lesson.m4a")
         self.assertLess(len(message), 700)
@@ -3425,6 +3436,8 @@ class NotifyFormattingTests(unittest.TestCase):
         self.assertIn("Открой красивую версию", sent_texts[-1]["text"])
         labels = [button["text"] for row in sent_texts[-1]["reply_markup"]["inline_keyboard"] for button in row]  # type: ignore[index]
         self.assertEqual(labels, ["Открыть красиво"])
+        article_url = sent_texts[-1]["reply_markup"]["inline_keyboard"][0][0]["web_app"]["url"]  # type: ignore[index]
+        self.assertTrue(str(article_url).endswith("/article.html?v=3"))
         self.assertEqual([path.name for path, _name in sent_docs], ["roadmap-article.html", "roadmap-article.pdf"])
         self.assertEqual([name for _path, name in sent_docs], ["Настя а2 roadmap.html", "Настя а2 roadmap.pdf"])
         editor_commands = [
