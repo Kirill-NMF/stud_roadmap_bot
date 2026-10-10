@@ -374,6 +374,24 @@ Latest deployed whole-article edit default (2026-10-02):
 - Production rollback point:
   `/var/backups/zoom-audio-pipeline/104af45-pre-20261002`.
 
+Latest deployed sparse whole-article patch contract (2026-10-10):
+
+- Commit `a7c5514` is deployed on the VPS.
+- Whole-article corrections now let Gemini return only blocks that actually
+  change. `keep` operations and unchanged blocks are omitted, while checkbox
+  edits retain the previous exact selected-block contract.
+- Empty or materially unchanged whole-article patches are retried once and are
+  never rendered or delivered as a successful new version.
+- Clean Windows and Linux suites pass `147/147`; 12 POSIX-only tests are
+  skipped on Windows. Focused post-deploy editor tests pass `25/25`.
+- Replaying both saved whole-article edits from the latest affected run with
+  sparse operations reproduced their delivered versions exactly.
+- Runtime matches the repository, the Telegram webhook remains active, and
+  public health returns `200`. No real Gemini call or Telegram correction was
+  used; the owner will perform the final live smoke.
+- Production rollback point:
+  `/var/backups/zoom-audio-pipeline/a7c5514-pre-20261010`.
+
 ## Next Useful Hardening
 
 - Add focused tests for `process-new-audio` in-progress/idempotency behavior.
