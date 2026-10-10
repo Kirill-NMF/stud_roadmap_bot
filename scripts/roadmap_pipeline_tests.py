@@ -462,6 +462,50 @@ class ArticleEditingContractTests(unittest.TestCase):
                 },
             )
 
+    def test_whole_article_sparse_patch_accepts_only_changed_blocks(self) -> None:
+        manifest = ARTICLE_EDITOR.build_manifest(self.ARTICLE)
+        patch_value = {
+            "article_version": 1,
+            "operations": [{
+                "block_id": "b_002",
+                "action": "replace",
+                "replacement": "Текст стал короче.",
+            }],
+        }
+
+        normalized = ARTICLE_EDITOR.validate_patch(
+            manifest,
+            ["b_001", "b_002"],
+            patch_value,
+            require_exact=False,
+        )
+        updated = ARTICLE_EDITOR.apply_validated_patch(
+            self.ARTICLE,
+            manifest,
+            ["b_001", "b_002"],
+            patch_value,
+            require_exact=False,
+        )
+
+        self.assertEqual([item["block_id"] for item in normalized], ["b_002"])
+        self.assertIn("# Roadmap", updated)
+        self.assertIn("## Текущая точка", updated)
+        self.assertIn("Текст стал короче.", updated)
+
+    def test_whole_article_sparse_patch_rejects_keep_and_empty_operations(self) -> None:
+        manifest = ARTICLE_EDITOR.build_manifest(self.ARTICLE)
+        for operations in (
+            [],
+            [{"block_id": "b_001", "action": "keep", "replacement": ""}],
+        ):
+            with self.subTest(operations=operations):
+                with self.assertRaisesRegex(ValueError, "changed operation"):
+                    ARTICLE_EDITOR.validate_patch(
+                        manifest,
+                        ["b_001", "b_002"],
+                        {"article_version": 1, "operations": operations},
+                        require_exact=False,
+                    )
     def test_section_replacement_reattaches_immutable_heading(self) -> None:
         manifest = ARTICLE_EDITOR.build_manifest(self.ARTICLE)
         for replacement in (
@@ -525,6 +569,22 @@ class ArticleEditingContractTests(unittest.TestCase):
         self.assertIn("только тело раздела", prompt)
         self.assertIn("заголовок вернёт сервер", prompt)
         self.assertIn("Второй оставь, третий сократи", prompt)
+
+    def test_whole_article_prompt_requests_sparse_changed_operations(self) -> None:
+        manifest = ARTICLE_EDITOR.build_manifest(self.ARTICLE)
+        payload = ARTICLE_EDITOR.build_gemini_payload(
+            self.ARTICLE,
+            manifest,
+            ["b_001", "b_002"],
+            "Убери повторы по всей статье.",
+            "google/gemini-2.5-pro",
+            selection_scope="whole_article",
+        )
+
+        prompt = payload["messages"][0]["content"]
+        self.assertIn("вся статья", prompt.lower())
+        self.assertIn("только для блоков, которые действительно нужно изменить", prompt)
+        self.assertIn("не возвращай keep", prompt.lower())
 
     def test_editor_html_has_fixed_numbers_and_never_uses_inner_html(self) -> None:
         manifest = ARTICLE_EDITOR.build_manifest(self.ARTICLE)
@@ -769,6 +829,57 @@ class ArticleEditWorkerTests(unittest.TestCase):
         self.assertEqual(len([command for command in self.commands if command[0] == "notifier"]), 1)
         saved_job = json.loads(self.job.read_text(encoding="utf-8"))
         self.assertEqual(saved_job["status"], "done")
+
+    def test_whole_article_worker_accepts_sparse_patch_on_first_attempt(self) -> None:
+        job = json.loads(self.job.read_text(encoding="utf-8"))
+        job["selection_scope"] = "whole_article"
+        job["selected_block_ids"] = ["b_001", "b_002"]
+        self.job.write_text(json.dumps(job, ensure_ascii=False), encoding="utf-8")
+        calls: list[dict[str, object]] = []
+
+        def model_request(payload: dict[str, object], _api_key: str) -> dict[str, object]:
+            calls.append(payload)
+            return self.valid_patch()
+
+        result = ARTICLE_EDITOR.process_edit_job(
+            self.job,
+            env={"OPENROUTER_API_KEY": "secret"},
+            model_request=model_request,
+            run_command=self.fake_run,
+            renderer="renderer",
+            notifier="notifier",
+        )
+
+        self.assertEqual(result, "done")
+        self.assertEqual(len(calls), 1)
+        self.assertIn("Второй абзац стал короче.", self.article.read_text(encoding="utf-8"))
+
+    def test_whole_article_worker_retries_no_change_and_does_not_notify(self) -> None:
+        original = self.article.read_text(encoding="utf-8")
+        job = json.loads(self.job.read_text(encoding="utf-8"))
+        job["selection_scope"] = "whole_article"
+        job["selected_block_ids"] = ["b_001", "b_002"]
+        self.job.write_text(json.dumps(job, ensure_ascii=False), encoding="utf-8")
+        calls = 0
+
+        def no_change(_payload: dict[str, object], _api_key: str) -> dict[str, object]:
+            nonlocal calls
+            calls += 1
+            return {"article_version": 1, "operations": []}
+
+        with self.assertRaisesRegex(RuntimeError, "Gemini patch validation failed"):
+            ARTICLE_EDITOR.process_edit_job(
+                self.job,
+                env={"OPENROUTER_API_KEY": "secret"},
+                model_request=no_change,
+                run_command=self.fake_run,
+                renderer="renderer",
+                notifier="notifier",
+            )
+
+        self.assertEqual(calls, 2)
+        self.assertEqual(self.article.read_text(encoding="utf-8"), original)
+        self.assertFalse(any(command[0] == "notifier" for command in self.commands))
 
     def test_invalid_first_patch_is_retried_once(self) -> None:
         responses = [

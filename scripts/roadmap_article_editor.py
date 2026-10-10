@@ -141,6 +141,8 @@ def validate_patch(
     manifest: dict[str, Any],
     selected_block_ids: list[str],
     patch_value: dict[str, Any],
+    *,
+    require_exact: bool = True,
 ) -> list[dict[str, str]]:
     if not isinstance(patch_value, dict):
         raise ValueError("patch must be an object")
@@ -183,8 +185,12 @@ def validate_patch(
             replacement = ""
         normalized.append({"block_id": block_id, "action": action, "replacement": str(replacement)})
         seen.add(block_id)
-    if seen != set(selected):
+    if require_exact and seen != set(selected):
         raise ValueError("operations must match the selected block set exactly")
+    if not require_exact and (
+        not normalized or any(item["action"] == "keep" for item in normalized)
+    ):
+        raise ValueError("whole-article patch requires at least one changed operation")
     return normalized
 
 
@@ -193,12 +199,19 @@ def apply_validated_patch(
     manifest: dict[str, Any],
     selected_block_ids: list[str],
     patch_value: dict[str, Any],
+    *,
+    require_exact: bool = True,
 ) -> str:
     if manifest.get("source_sha256") != source_hash(markdown):
         raise ValueError("article source does not match manifest")
     operations = {
         item["block_id"]: item
-        for item in validate_patch(manifest, selected_block_ids, patch_value)
+        for item in validate_patch(
+            manifest,
+            selected_block_ids,
+            patch_value,
+            require_exact=require_exact,
+        )
     }
     lines = markdown.splitlines()
     blocks_by_id = {
@@ -206,7 +219,7 @@ def apply_validated_patch(
         for block in manifest["blocks"]
         if isinstance(block, dict)
     }
-    for block_id in sorted(selected_block_ids, key=lambda value: int(blocks_by_id[value]["start_line"]), reverse=True):
+    for block_id in sorted(operations, key=lambda value: int(blocks_by_id[value]["start_line"]), reverse=True):
         block = blocks_by_id[block_id]
         operation = operations[block_id]
         if operation["action"] == "keep":
@@ -253,7 +266,11 @@ def build_gemini_payload(
     selected_block_ids: list[str],
     instruction: str,
     model: str,
+    *,
+    selection_scope: str = "selected_blocks",
 ) -> dict[str, Any]:
+    if selection_scope not in {"selected_blocks", "whole_article"}:
+        raise ValueError("article edit selection scope is invalid")
     blocks = {str(item["id"]): item for item in manifest["blocks"]}
     selected = [
         {
@@ -267,22 +284,41 @@ def build_gemini_payload(
         for block_id in selected_block_ids
         if block_id in blocks
     ]
+    if selection_scope == "whole_article":
+        edit_rules = (
+            "Редактируется вся статья. Верни операции только для блоков, которые действительно нужно изменить "
+            "по инструкции: replace или delete. Не возвращай keep и не перечисляй неизменённые блоки. "
+            "Каждый изменяемый block_id укажи не более одного раза."
+        )
+        full_context = (
+            "Полная статья уже представлена выше как последовательность блоков с block_id; "
+            "не дублируй её в ответе."
+        )
+        block_label = "БЛОКИ ВСЕЙ СТАТЬИ"
+    else:
+        edit_rules = (
+            "Изменять разрешено только перечисленные выбранные блоки. Для каждого выбранного block_id "
+            "верни ровно одну операцию: keep, replace или delete."
+        )
+        full_context = markdown.strip()
+        block_label = "ВЫБРАННЫЕ БЛОКИ"
+
     prompt = f"""Ты локальный редактор финальной статьи для ученика.
 
 Полная статья ниже является контекстом и эталоном стиля. Сохраняй обращение к ученику, спокойный поддерживающий тон, естественную русскую лексику, длину и ритм предложений, терминологию и степень формальности.
 
-Изменять разрешено только перечисленные выбранные блоки. Для каждого выбранного block_id верни ровно одну операцию: keep, replace или delete. Не меняй порядок. Не добавляй факты, сроки, уровни, числа, обещания или договорённости, если голосовая инструкция прямо этого не требует. Делай минимально необходимое изменение. Для блока type=section верни в replacement только тело раздела, не повторяя заголовок: исходный заголовок вернёт сервер. Внутри section можно сохранять и менять абзацы, списки, таблицы и вложенные подзаголовки; не добавляй соседние разделы того же или более высокого уровня. Для переходного блока type=paragraph replacement должен оставаться одним абзацем. Не используй HTML. Для keep/delete replacement должен быть пустой строкой.
+{edit_rules} Не меняй порядок. Не добавляй факты, сроки, уровни, числа, обещания или договорённости, если голосовая инструкция прямо этого не требует. Делай минимально необходимое изменение. Для блока type=section верни в replacement только тело раздела, не повторяя заголовок: исходный заголовок вернёт сервер. Внутри section можно сохранять и менять абзацы, списки, таблицы и вложенные подзаголовки; не добавляй соседние разделы того же или более высокого уровня. Для переходного блока type=paragraph replacement должен оставаться одним абзацем. Не используй HTML. Для keep/delete replacement должен быть пустой строкой.
 
 Версия статьи: {manifest['article_version']}
 
-ВЫБРАННЫЕ БЛОКИ:
+{block_label}:
 {json.dumps(selected, ensure_ascii=False, indent=2)}
 
 ГОЛОСОВАЯ ИНСТРУКЦИЯ:
 {instruction.strip()}
 
 ПОЛНАЯ СТАТЬЯ, ТОЛЬКО КОНТЕКСТ СТИЛЯ:
-{markdown.strip()}
+{full_context}
 """
     return {
         "model": model,
@@ -328,6 +364,8 @@ def validation_error_diagnostic(attempt: int, error: Exception) -> dict[str, Any
     block_match = re.search(r"\b([bp]_\d{3})\b", message)
     if "operations must match the selected block set exactly" in message:
         code = "selected_block_mismatch"
+    elif "changed operation" in message or "does not change the article" in message:
+        code = "no_material_change"
     elif "sibling block" in message:
         code = "sibling_block"
     elif "HTML" in message:
@@ -427,6 +465,10 @@ def process_edit_job(
         selected = job.get("selected_block_ids", [])
         if not isinstance(selected, list):
             raise ValueError("article edit selection is invalid")
+        selection_scope = str(job.get("selection_scope") or "selected_blocks")
+        if selection_scope not in {"selected_blocks", "whole_article"}:
+            raise ValueError("article edit selection scope is invalid")
+        require_exact = selection_scope == "selected_blocks"
         if job.get("article_version") != manifest.get("article_version"):
             raise ValueError("article edit job uses a stale article version")
         instruction = str(job.get("instruction") or "").strip()
@@ -436,23 +478,51 @@ def process_edit_job(
         if not api_key:
             raise ValueError("OPENROUTER_API_KEY is not configured")
         model = env.get("ARTICLE_EDIT_MODEL") or env.get("GEMINI_REWRITE_MODEL") or DEFAULT_MODEL
-        payload = build_gemini_payload(markdown, manifest, [str(value) for value in selected], instruction, model)
+        payload = build_gemini_payload(
+            markdown,
+            manifest,
+            [str(value) for value in selected],
+            instruction,
+            model,
+            selection_scope=selection_scope,
+        )
 
         job_dir = job_path.parent / job_path.stem
         job_dir.mkdir(parents=True, exist_ok=True)
         patch_value: dict[str, Any] | None = None
+        updated: str | None = None
         validation_error = ""
         validation_attempts: list[dict[str, Any]] = []
         for attempt in range(1, 3):
             try:
                 candidate = model_request(payload, api_key)
-                validate_patch(manifest, [str(value) for value in selected], candidate)
+                validate_patch(
+                    manifest,
+                    [str(value) for value in selected],
+                    candidate,
+                    require_exact=require_exact,
+                )
+                candidate_updated = apply_validated_patch(
+                    markdown,
+                    manifest,
+                    [str(value) for value in selected],
+                    candidate,
+                    require_exact=require_exact,
+                )
+                if source_hash(candidate_updated) == source_hash(markdown):
+                    raise ValueError("patch does not change the article")
             except (ValueError, RuntimeError) as error:
                 validation_error = str(error)
                 validation_attempts.append(validation_error_diagnostic(attempt, error))
                 write_json_atomic(job_dir / "validation-attempts.json", validation_attempts)
                 if attempt == 1:
                     payload = dict(payload)
+                    retry_contract = (
+                        "Верни только операции replace/delete для реально изменяемых блоков; "
+                        "не возвращай keep и неизменённые блоки."
+                        if not require_exact
+                        else "Верни заново полный набор операций строго по заданной схеме."
+                    )
                     payload["messages"] = [
                         *payload["messages"],
                         {
@@ -460,7 +530,7 @@ def process_edit_job(
                             "content": (
                                 "Предыдущий ответ не прошёл JSON/patch-проверку. "
                                 f"Ошибка: {validation_error}. "
-                                "Верни заново полный набор операций строго по заданной схеме. "
+                                f"{retry_contract} "
                                 "Для section в replacement верни только тело раздела без его заголовка."
                             ),
                         },
@@ -468,19 +538,14 @@ def process_edit_job(
                     continue
                 break
             patch_value = candidate
+            updated = candidate_updated
             break
-        if patch_value is None:
+        if patch_value is None or updated is None:
             raise RuntimeError(f"Gemini patch validation failed after two attempts: {validation_error}")
 
         stage_dir = job_dir / "staged"
         stage_dir.mkdir(parents=True, exist_ok=True)
         write_json_atomic(job_dir / "gemini-patch.json", patch_value)
-        updated = apply_validated_patch(
-            markdown,
-            manifest,
-            [str(value) for value in selected],
-            patch_value,
-        )
         staged_markdown = stage_dir / "roadmap-article.md"
         staged_html = stage_dir / "roadmap-article.html"
         staged_pdf = stage_dir / "roadmap-article.pdf"
