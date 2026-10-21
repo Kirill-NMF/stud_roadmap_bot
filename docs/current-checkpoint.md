@@ -394,6 +394,7 @@ Latest deployed sparse whole-article patch contract (2026-10-10):
 
 Latest style and verification hardening (2026-10-21):
 
+- Commit `01edf9d` is deployed on the VPS.
 - The Gemini rewrite chain now enforces an adult `study buddy` tone without
   irony, marketing hype, high-confidence AI cliches, or templated rhetorical
   contrasts such as `не просто X, а Y` and `не только X, но и Y`.
@@ -415,6 +416,8 @@ Latest style and verification hardening (2026-10-21):
   two intermediate responses that changed levels, then produced a final version
   preserving the headings, `A2`, two lessons per week, the six-month timeline,
   and `B1`, with no remaining flagged style patterns.
+- Production rollback point:
+  `/var/backups/zoom-audio-pipeline/01edf9d-pre-20261021`.
 
 ## Next Useful Hardening
 
