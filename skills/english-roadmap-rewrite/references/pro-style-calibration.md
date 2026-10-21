@@ -152,7 +152,7 @@ Use this exact first-pass prompt header. After `ИСХОДНЫЙ ТЕКСТ:`, p
 ### Pass 2: Study Buddy Style Calibration
 
 ```text
-Перепиши это также, только теперь в стиле друга по английскому — study buddy: тепло, поддерживающе и по-человечески, как взрослый друг, который помогает спокойно разобраться и двигаться дальше. Без иронии, сюсюканья, детских образов и фамильярности. Структуру и факты не меняй.
+Перепиши это также, только теперь в стиле друга по английскому — study buddy: тепло, поддерживающе и по-человечески, как взрослый друг, который помогает спокойно разобраться и двигаться дальше. Без иронии, сюсюканья, детских образов, фамильярности, рекламной гиперболы и нейросетевых штампов. Не используй шаблонные противопоставления «не просто X, а Y», «не только X, но и Y» и «не X, а Y», если мысль можно сказать прямо. Естественные отрицания, необходимые для точности, сохраняй. Структуру и факты не меняй.
 ```
 
 The study buddy is an adult peer, not a cartoon character, motivational coach, or overly familiar friend. Use this as a style direction, not as permission to break facts or structure. If the model becomes too slang-heavy, continue with the anglicism pass below.

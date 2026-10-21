@@ -26,6 +26,25 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_MODEL = "google/gemini-2.5-pro"
 ARTICLE_EDIT_LOCK_STALE_SECONDS = 30 * 60
 
+STYLE_EDIT_GUIDANCE = (
+    "Постоянный стиль статьи — взрослый study buddy: спокойно, тепло и конкретно. "
+    "Не используй иронию, рекламную гиперболу и нейросетевые штампы. "
+    "Избегай шаблонных противопоставлений «не просто X, а Y», «не только X, но и Y» "
+    "и «не X, а Y», если мысль можно сказать прямо. Естественные отрицания, которые "
+    "нужны для точного смысла, сохраняй."
+)
+STYLE_CLEANUP_TERMS = (
+    "нейросет", "штамп", "конструкц", "отрицан", "частиц", "ирони", "реклам", "гипербол"
+)
+STYLE_ISSUE_PATTERNS = (
+    ("не просто X, а Y", re.compile(r"\bне\s+просто\b[^.!?\n]{0,140}\bа\b", re.IGNORECASE)),
+    ("не только X, но и Y", re.compile(r"\bне\s+только\b[^.!?\n]{0,140}\bно\s+и\b", re.IGNORECASE)),
+    ("не X, а Y", re.compile(r"\bне\s+[^,.!?\n]{1,90},\s*а\s+[^.!?\n]{1,120}", re.IGNORECASE)),
+    ("шаг за шагом", re.compile(r"\bшаг\s+за\s+шагом\b", re.IGNORECASE)),
+    ("без лишнего стресса", re.compile(r"\bбез\s+лишн(?:его|их)\s+стресс", re.IGNORECASE)),
+    ("рекламное обещание", re.compile(r"\b(?:всё\s+точно\s+получится|гарантирован\w*|невероятн\w*\s+результат\w*|прорыв)\b", re.IGNORECASE)),
+)
+
 
 def source_hash(markdown: str) -> str:
     return hashlib.sha256(markdown.encode("utf-8")).hexdigest()
@@ -194,6 +213,50 @@ def validate_patch(
     return normalized
 
 
+def instruction_requests_style_cleanup(instruction: str) -> bool:
+    lowered = instruction.lower()
+    return any(term in lowered for term in STYLE_CLEANUP_TERMS)
+
+
+def find_style_issues(text: str) -> list[str]:
+    return [label for label, pattern in STYLE_ISSUE_PATTERNS if pattern.search(text)]
+
+
+def validate_requested_style_cleanup(
+    manifest: dict[str, Any],
+    selected_block_ids: list[str],
+    patch_value: dict[str, Any],
+    instruction: str,
+    *,
+    require_exact: bool = True,
+) -> None:
+    if not instruction_requests_style_cleanup(instruction):
+        return
+    normalized = validate_patch(
+        manifest,
+        selected_block_ids,
+        patch_value,
+        require_exact=require_exact,
+    )
+    operations = {item["block_id"]: item for item in normalized}
+    blocks_by_id = {
+        str(block["id"]): block
+        for block in manifest.get("blocks", [])
+        if isinstance(block, dict) and block.get("id")
+    }
+    resulting_parts: list[str] = []
+    for block_id in selected_block_ids:
+        block = blocks_by_id[block_id]
+        operation = operations.get(block_id)
+        if operation is None or operation["action"] == "keep":
+            resulting_parts.append(str(block.get("text") or ""))
+        elif operation["action"] == "replace":
+            resulting_parts.append(operation["replacement"])
+    issues = find_style_issues("\n\n".join(resulting_parts))
+    if issues:
+        raise ValueError("style cleanup incomplete: " + ", ".join(issues))
+
+
 def apply_validated_patch(
     markdown: str,
     manifest: dict[str, Any],
@@ -307,6 +370,8 @@ def build_gemini_payload(
 
 Полная статья ниже является контекстом и эталоном стиля. Сохраняй обращение к ученику, спокойный поддерживающий тон, естественную русскую лексику, длину и ритм предложений, терминологию и степень формальности.
 
+{STYLE_EDIT_GUIDANCE}
+
 {edit_rules} Не меняй порядок. Не добавляй факты, сроки, уровни, числа, обещания или договорённости, если голосовая инструкция прямо этого не требует. Делай минимально необходимое изменение. Для блока type=section верни в replacement только тело раздела, не повторяя заголовок: исходный заголовок вернёт сервер. Внутри section можно сохранять и менять абзацы, списки, таблицы и вложенные подзаголовки; не добавляй соседние разделы того же или более высокого уровня. Для переходного блока type=paragraph replacement должен оставаться одним абзацем. Не используй HTML. Для keep/delete replacement должен быть пустой строкой.
 
 Версия статьи: {manifest['article_version']}
@@ -366,6 +431,8 @@ def validation_error_diagnostic(attempt: int, error: Exception) -> dict[str, Any
         code = "selected_block_mismatch"
     elif "changed operation" in message or "does not change the article" in message:
         code = "no_material_change"
+    elif "style cleanup incomplete" in message:
+        code = "style_cleanup_incomplete"
     elif "sibling block" in message:
         code = "sibling_block"
     elif "HTML" in message:
@@ -500,6 +567,13 @@ def process_edit_job(
                     manifest,
                     [str(value) for value in selected],
                     candidate,
+                    require_exact=require_exact,
+                )
+                validate_requested_style_cleanup(
+                    manifest,
+                    [str(value) for value in selected],
+                    candidate,
+                    instruction,
                     require_exact=require_exact,
                 )
                 candidate_updated = apply_validated_patch(

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -16,6 +17,55 @@ from typing import Any
 
 DEFAULT_MODEL = "google/gemini-2.5-pro"
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+
+STYLE_GUIDANCE = (
+    "Пиши как взрослый study buddy: спокойно, тепло и конкретно. "
+    "Убери иронию, рекламную гиперболу и нейросетевые штампы. "
+    "Не используй шаблонные противопоставления «не просто X, а Y», "
+    "«не только X, но и Y» и «не X, а Y», если ту же мысль можно сказать прямо. "
+    "Сохраняй естественные отрицания, которые нужны для точного смысла."
+)
+
+STYLE_ISSUE_PATTERNS = (
+    ("не просто X, а Y", re.compile(r"\bне\s+просто\b[^.!?\n]{0,140}\bа\b", re.IGNORECASE)),
+    ("не только X, но и Y", re.compile(r"\bне\s+только\b[^.!?\n]{0,140}\bно\s+и\b", re.IGNORECASE)),
+    ("не X, а Y", re.compile(r"\bне\s+[^,.!?\n]{1,90},\s*а\s+[^.!?\n]{1,120}", re.IGNORECASE)),
+    ("шаг за шагом", re.compile(r"\bшаг\s+за\s+шагом\b", re.IGNORECASE)),
+    ("без лишнего стресса", re.compile(r"\bбез\s+лишн(?:его|их)\s+стресс", re.IGNORECASE)),
+    ("рекламное обещание", re.compile(r"\b(?:всё\s+точно\s+получится|гарантирован\w*|невероятн\w*\s+результат\w*|прорыв)\b", re.IGNORECASE)),
+)
+HEADING_PATTERN = re.compile(r"^#{1,6}\s+.+$", re.MULTILINE)
+LEVEL_PATTERN = re.compile(r"\b(?:[AА][012]|[BВ][12]|[CС][12])\+?\b", re.IGNORECASE)
+NUMBER_PATTERN = re.compile(
+    r"\b(?:ноль|один|одна|одно|два|две|три|четыре|пять|шесть|семь|восемь|девять|десять|\d+(?:[.,]\d+)?)\b",
+    re.IGNORECASE,
+)
+PROTECTED_DOMAIN_TERMS = (
+    "Progress.me", "YouTube", "shorts", "reels", "small talk", "foreign company"
+)
+
+
+def find_style_issues(text: str) -> list[str]:
+    return [label for label, pattern in STYLE_ISSUE_PATTERNS if pattern.search(text)]
+
+
+def find_rewrite_contract_issues(source: str, candidate: str) -> list[str]:
+    issues: list[str] = []
+    if HEADING_PATTERN.findall(source) != HEADING_PATTERN.findall(candidate):
+        issues.append("headings changed")
+    if {value.upper().translate(str.maketrans("АВС", "ABC")) for value in LEVEL_PATTERN.findall(source)} != {
+        value.upper().translate(str.maketrans("АВС", "ABC")) for value in LEVEL_PATTERN.findall(candidate)
+    }:
+        issues.append("levels changed")
+    if {value.lower() for value in NUMBER_PATTERN.findall(source)} != {
+        value.lower() for value in NUMBER_PATTERN.findall(candidate)
+    }:
+        issues.append("numbers changed")
+    source_terms = {term for term in PROTECTED_DOMAIN_TERMS if term.lower() in source.lower()}
+    candidate_terms = {term for term in PROTECTED_DOMAIN_TERMS if term.lower() in candidate.lower()}
+    if source_terms != candidate_terms:
+        issues.append("domain terms changed")
+    return issues
 
 PASS_1_HEADER = """Ты русский редактор и рерайтер student-facing текстов для аудитории 25–30 лет.
 
@@ -114,28 +164,29 @@ PASS_2_PROMPT = (
     "Перепиши это также, только теперь в стиле друга по английскому — study buddy: "
     "тепло, поддерживающе и по-человечески, как взрослый друг, который помогает "
     "спокойно разобраться и двигаться дальше. Без иронии, сюсюканья, детских образов "
-    "и фамильярности. Структуру и факты не меняй."
+    "и фамильярности. " + STYLE_GUIDANCE + " Структуру и факты не меняй."
 )
 
 SAFE_PASS_2_PROMPT = (
     "Перепиши это также, только теперь в стиле друга по английскому — study buddy: "
     "тепло, поддерживающе и по-человечески, как взрослый друг, который помогает "
     "спокойно разобраться и двигаться дальше. Без иронии, сюсюканья, детских образов "
-    "и фамильярности. Структуру и факты не меняй."
+    "и фамильярности. " + STYLE_GUIDANCE + " Структуру и факты не меняй."
 )
 
 PASS_3_PROMPT = (
     "Просто идеально. Только я хочу, чтобы ты использовал чуть меньше англицизмов. "
     "Смотри, я сказал немного убери англицизмы. Это значит то, что убери англицизмы, "
     "которые не свойственны русской речи, которые обычно в текстах пишутся английскими "
-    "буквами. Те, что пишутся русскими буквами, можно оставить из предыдущего текста."
+    "буквами. Те, что пишутся русскими буквами, можно оставить из предыдущего текста. "
+    + STYLE_GUIDANCE
 )
 
 SAFE_PASS_3_PROMPT = (
     "Просто идеально. Только я хочу, чтобы ты использовал чуть меньше англицизмов. "
     "Это значит то, что убери англицизмы, которые не свойственны русской речи, которые "
     "обычно в текстах пишутся английскими буквами. Те, что пишутся русскими буквами, "
-    "можно оставить из предыдущего текста."
+    "можно оставить из предыдущего текста. " + STYLE_GUIDANCE
 )
 
 SAFE_SYSTEM_PROMPT = """Ты работаешь как аккуратный редактор финальной student-facing статьи.
@@ -152,6 +203,8 @@ SAFE_SYSTEM_PROMPT = """Ты работаешь как аккуратный ре
 - не меняй структуру таблиц;
 - не переводи и не заменяй доменные термины, если они уже есть в тексте: Progress.me, YouTube, shorts, reels, small talk, foreign company, A0, A1, A2, B1, B2;
 - если пользователь просит стиль или вайб, это относится только к тону, плавности и живости языка.
+
+Постоянный стиль: взрослый study buddy, без иронии, рекламной гиперболы и нейросетевых штампов. Избегай шаблонных конструкций «не просто X, а Y», «не только X, но и Y» и «не X, а Y», когда мысль можно сформулировать прямо. Естественные отрицания, необходимые для точности, сохраняй.
 
 Если не уверен, сохраняй исходную формулировку ближе к тексту."""
 
@@ -309,6 +362,7 @@ def main() -> int:
 
     final_content = ""
     for index, prompt in enumerate(pass_prompts, start=1):
+        previous_content = final_content or source
         messages.append({"role": "user", "content": prompt})
         if save_dir:
             write_json(save_dir / f"pass{index}-request-messages.json", messages)
@@ -324,8 +378,13 @@ def main() -> int:
             reasoning=reasoning,
         )
         elapsed = round(time.time() - started, 3)
-        messages.append(assistant_history_message(assistant_message))
-        final_content = content
+        contract_issues = find_rewrite_contract_issues(source, content)
+        if contract_issues:
+            messages.append({"role": "assistant", "content": previous_content})
+            final_content = previous_content
+        else:
+            messages.append(assistant_history_message(assistant_message))
+            final_content = content
 
         if save_dir:
             (save_dir / f"pass{index}.md").write_text(content, encoding="utf-8")
@@ -336,8 +395,44 @@ def main() -> int:
                 "finish_reason": raw.get("choices", [{}])[0].get("finish_reason"),
                 "elapsed_seconds": elapsed,
                 "has_reasoning": bool(assistant_message.get("reasoning_details") or assistant_message.get("reasoning")),
+                "contract_issues": contract_issues,
             }
             write_json(save_dir / f"pass{index}-usage.json", usage)
+
+    style_issues = find_style_issues(final_content)
+    if style_issues:
+        repair_prompt = (
+            "Проведи финальную редакторскую проверку. Убери только найденные стилистические "
+            f"проблемы: {', '.join(style_issues)}. {STYLE_GUIDANCE} "
+            "Структуру, заголовки, факты, сроки, уровни, числа и договорённости не меняй. "
+            "Верни только исправленный Markdown."
+        )
+        messages.append({"role": "user", "content": repair_prompt})
+        started = time.time()
+        content, assistant_message, response = request_chat(
+            api_key=api_key,
+            model=args.model,
+            messages=messages,
+            temperature=args.temperature,
+            max_tokens=args.max_tokens,
+            top_p=args.top_p,
+            reasoning=reasoning,
+        )
+        contract_issues = find_rewrite_contract_issues(source, content)
+        if not contract_issues:
+            messages.append(assistant_history_message(assistant_message))
+            final_content = content
+        else:
+            messages.append({"role": "assistant", "content": final_content})
+        if save_dir:
+            (save_dir / "style-repair.md").write_text(content, encoding="utf-8")
+            write_json(save_dir / "style-repair-request-messages.json", messages[:-1])
+            write_json(save_dir / "style-repair-usage.json", {
+                "elapsed_seconds": round(time.time() - started, 3),
+                "usage": response.get("usage", {}),
+                "contract_issues": contract_issues,
+                "remaining_issues": find_style_issues(final_content),
+            })
 
     if save_dir:
         write_json(save_dir / "final-history.json", messages)

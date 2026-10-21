@@ -193,17 +193,35 @@ class PromptRuleTests(unittest.TestCase):
 
         self.assertIn("## 9. Решения перед генерацией", prompt)
         for topic in (
-            "Этапы Roadmap",
+            "Количество этапов Roadmap",
+            "Результат каждого этапа",
+            "Текущий уровень",
+            "Расписание и частота",
+            "Формат занятий",
             "Контент ученика",
-            "Групповой и индивидуальный формат",
             "Домашняя работа",
             "Чек-лист до старта",
-            "Уровень и результаты",
         ):
             self.assertIn(topic, prompt)
         self.assertIn("**Из созвона:**", prompt)
         self.assertIn("**Предложение:**", prompt)
         self.assertIn("не включается после общего ответа", prompt)
+
+    def test_verification_decisions_are_prefilled_for_confirmation(self) -> None:
+        prompt = (ROOT / "scripts/consultation_verification_prompt.md").read_text(encoding="utf-8")
+
+        for topic in (
+            "Количество этапов Roadmap",
+            "Результат каждого этапа",
+            "Текущий уровень",
+            "Расписание и частота",
+            "Формат занятий",
+        ):
+            self.assertIn(topic, prompt)
+        self.assertIn("сформулируй найденный вариант", prompt)
+        self.assertIn("Не проси преподавателя отвечать с нуля", prompt)
+        self.assertIn("конкретные дни и время не зафиксированы", prompt)
+        self.assertIn("Не указываем их в статье", prompt)
 
     def test_article_prompt_has_current_approval_and_p_option_rules(self) -> None:
         prompt = (ROOT / "scripts/consultation_article_prompt.md").read_text(encoding="utf-8")
@@ -233,6 +251,47 @@ class PromptRuleTests(unittest.TestCase):
         self.assertIn("Без иронии", chain)
         self.assertIn("детских образов", chain)
         self.assertIn("Структуру и факты не меняй", chain)
+        self.assertIn("нейросетевых штампов", chain)
+        self.assertIn("рекламной гиперболы", chain)
+        self.assertIn("не просто X, а Y", chain)
+        self.assertIn("не только X, но и Y", chain)
+
+    def test_gemini_style_lint_detects_high_confidence_cliches(self) -> None:
+        chain_module = load_module(
+            "openrouter_gemini_chat_chain_style_test",
+            "skills/english-roadmap-rewrite/scripts/openrouter_gemini_chat_chain.py",
+        )
+
+        issues = chain_module.find_style_issues(
+            "Это не просто урок, а твой прорыв. Шаг за шагом всё точно получится."
+        )
+
+        self.assertIn("не просто X, а Y", issues)
+        self.assertIn("шаг за шагом", issues)
+        self.assertIn("рекламное обещание", issues)
+
+    def test_gemini_rewrite_contract_rejects_changed_facts_and_structure(self) -> None:
+        chain_module = load_module(
+            "openrouter_gemini_chat_chain_contract_test",
+            "skills/english-roadmap-rewrite/scripts/openrouter_gemini_chat_chain.py",
+        )
+        source = "# Roadmap\n\n## План\n\nУровень A2. Два занятия. Через шесть месяцев — B1."
+        candidate = (
+            "# Новый путь\n\n## План\n\nУровень A0. Два занятия. Через три месяца — A1. "
+            "Работаем на Progress.me."
+        )
+
+        issues = chain_module.find_rewrite_contract_issues(source, candidate)
+
+        self.assertIn("headings changed", issues)
+        self.assertIn("levels changed", issues)
+        self.assertIn("numbers changed", issues)
+        self.assertIn("domain terms changed", issues)
+        cyrillic_levels = source.replace("A2", "А2").replace("B1", "В1")
+        self.assertNotIn(
+            "levels changed",
+            chain_module.find_rewrite_contract_issues(source, cyrillic_levels),
+        )
 
     def test_article_prompt_transfers_symbolic_verification_without_review_numbers(self) -> None:
         prompt = (ROOT / "scripts/consultation_article_prompt.md").read_text(encoding="utf-8")
@@ -569,6 +628,27 @@ class ArticleEditingContractTests(unittest.TestCase):
         self.assertIn("только тело раздела", prompt)
         self.assertIn("заголовок вернёт сервер", prompt)
         self.assertIn("Второй оставь, третий сократи", prompt)
+        self.assertIn("study buddy", prompt)
+        self.assertIn("нейросетевые штампы", prompt)
+        self.assertIn("не просто X, а Y", prompt)
+
+    def test_style_cleanup_rejects_patch_that_keeps_forbidden_patterns(self) -> None:
+        article = "# Roadmap\n\nЭто не просто урок, а твой прорыв.\n"
+        manifest = ARTICLE_EDITOR.build_manifest(article)
+        patch_value = {
+            "article_version": 1,
+            "operations": [
+                {"block_id": "b_001", "action": "keep", "replacement": ""},
+            ],
+        }
+
+        with self.assertRaisesRegex(ValueError, "style cleanup incomplete"):
+            ARTICLE_EDITOR.validate_requested_style_cleanup(
+                manifest,
+                ["b_001"],
+                patch_value,
+                "Убери нейросетевые штампы и конструкции с отрицанием.",
+            )
 
     def test_whole_article_prompt_requests_sparse_changed_operations(self) -> None:
         manifest = ARTICLE_EDITOR.build_manifest(self.ARTICLE)

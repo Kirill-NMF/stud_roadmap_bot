@@ -392,6 +392,30 @@ Latest deployed sparse whole-article patch contract (2026-10-10):
 - Production rollback point:
   `/var/backups/zoom-audio-pipeline/a7c5514-pre-20261010`.
 
+Latest style and verification hardening (2026-10-21):
+
+- The Gemini rewrite chain now enforces an adult `study buddy` tone without
+  irony, marketing hype, high-confidence AI cliches, or templated rhetorical
+  contrasts such as `не просто X, а Y` and `не только X, но и Y`.
+- A conditional cleanup pass runs only when the final rewrite still contains a
+  known high-confidence pattern. Minor style warnings do not block delivery.
+- Every Gemini pass is checked against the original heading sequence, CEFR
+  levels, cardinal numbers, and protected domain terms. A response that changes
+  those invariants is discarded and the chain continues from the last valid
+  version.
+- Whole-article voice edits that explicitly request removal of cliches,
+  negative contrasts, irony, or marketing language must actually remove the
+  detected patterns; otherwise the existing one-retry contract is used instead
+  of reporting a false success.
+- Verification decisions are prefilled from the call for roadmap stage count,
+  result of every stage, current level, schedule/frequency, and lesson format.
+  The teacher confirms or slightly corrects a proposed formulation instead of
+  answering an empty questionnaire.
+- The clean Linux suite passes `151/151`. An isolated real Gemini smoke rejected
+  two intermediate responses that changed levels, then produced a final version
+  preserving the headings, `A2`, two lessons per week, the six-month timeline,
+  and `B1`, with no remaining flagged style patterns.
+
 ## Next Useful Hardening
 
 - Add focused tests for `process-new-audio` in-progress/idempotency behavior.
