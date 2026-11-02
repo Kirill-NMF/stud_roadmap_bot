@@ -18,6 +18,9 @@ LOG="$RUN_DIR/codex-verification.log"
 LAST="$RUN_DIR/codex-verification-last-message.md"
 STATUS="$RUN_DIR/status.json"
 
+MODEL="${CODEX_VERIFICATION_MODEL:-gpt-5.6-terra}"
+REASONING="${CODEX_VERIFICATION_REASONING_EFFORT:-medium}"
+
 if [[ ! -d "$RUN_DIR" ]]; then
   echo "run dir does not exist: $RUN_DIR" >&2
   exit 2
@@ -62,6 +65,8 @@ CODEX_INPUT="$(cat "$PROMPT")"
 if ! timeout "${CODEX_VERIFICATION_TIMEOUT_SECONDS:-900}" codex --disable shell_tool -a never exec \
   --skip-git-repo-check \
   --cd "$RUN_DIR" \
+  --model "$MODEL" \
+  -c "model_reasoning_effort=\"$REASONING\"" \
   --sandbox read-only \
   --output-last-message "$LAST" \
   "$CODEX_INPUT" </dev/null > "$LOG" 2>&1; then

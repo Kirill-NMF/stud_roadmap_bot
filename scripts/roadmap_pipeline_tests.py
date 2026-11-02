@@ -1117,12 +1117,21 @@ class ArticleEditWorkerTests(unittest.TestCase):
         self.assertFalse(lock_dir.exists())
 
 
+class CodexVerificationScriptTests(unittest.TestCase):
+    def test_codex_verification_wrapper_pins_terra_medium(self) -> None:
+        script = (ROOT / "scripts/generate_verification_with_codex.sh").read_text(encoding="utf-8")
+        self.assertIn('CODEX_VERIFICATION_MODEL:-gpt-5.6-terra', script)
+        self.assertIn('CODEX_VERIFICATION_REASONING_EFFORT:-medium', script)
+        self.assertIn('--model "$MODEL"', script)
+        self.assertIn('-c "model_reasoning_effort=\\\"$REASONING\\\""', script)
+
+
 class CodexArticleScriptTests(unittest.TestCase):
     def test_codex_article_wrapper_has_terra_retry_and_fallback_contract(self) -> None:
         script = (ROOT / "scripts/generate_article_with_codex.sh").read_text(encoding="utf-8")
         runner = (ROOT / "scripts/run_codex_article_hedge.py").read_text(encoding="utf-8")
         self.assertIn('CODEX_ARTICLE_MODEL:-gpt-5.6-terra', script)
-        self.assertIn('CODEX_ARTICLE_REASONING_EFFORT:-high', script)
+        self.assertIn('CODEX_ARTICLE_REASONING_EFFORT:-medium', script)
         self.assertIn('CODEX_ARTICLE_HEDGE_DELAY_SECONDS:-65', script)
         self.assertIn('CODEX_ARTICLE_FALLBACK_AFTER_SECONDS:-145', script)
         self.assertIn('CODEX_ARTICLE_PRIMARY_TIMEOUT_SECONDS:-900', script)
@@ -1143,7 +1152,7 @@ class CodexArticleScriptTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(len(calls), 1)
         self.assertIn("gpt-5.6-terra", calls[0])
-        self.assertIn('model_reasoning_effort="high"', calls[0])
+        self.assertIn('model_reasoning_effort="medium"', calls[0])
         self.assertFalse(fallback_called)
         self.assertEqual(status["article_generation_provider"], "codex_cli")
         self.assertEqual(status["article_codex_attempts"], 1)
