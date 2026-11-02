@@ -9,6 +9,7 @@ Environment=PIPELINE_ENV_FILE=/etc/zoom-audio-pipeline/pipeline.env
 ExecStart=/usr/local/bin/telegram-roadmap-webhook --env-file /etc/zoom-audio-pipeline/pipeline.env --notion-env-file /etc/zoom-audio-pipeline/pipeline.env
 Restart=always
 RestartSec=3
+OOMPolicy=continue
 User=root
 WorkingDirectory=/var/lib/zoom-audio-pipeline
 StandardOutput=append:/var/log/zoom-audio-pipeline/telegram-webhook.log

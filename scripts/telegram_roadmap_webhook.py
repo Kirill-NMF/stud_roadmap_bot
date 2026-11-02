@@ -26,10 +26,10 @@ DEFAULT_REGISTRY_FILE = "/var/lib/zoom-audio-pipeline/telegram-run-registry.json
 DEFAULT_EVENTS_FILE = "/var/log/zoom-audio-pipeline/events.jsonl"
 DEFAULT_VOICE_PYTHON = "python3"
 DEFAULT_VOICE_TRANSCRIBER = "/usr/local/bin/transcribe-telegram-voice"
-DEFAULT_VOICE_TRANSCRIBE_TIMEOUT = 900
+DEFAULT_VOICE_TRANSCRIBE_TIMEOUT = 300
 DEFAULT_VOICE_PROVIDER = "openrouter"
 DEFAULT_VOICE_OPENROUTER_MODEL = "openai/whisper-large-v3-turbo"
-DEFAULT_VOICE_OPENROUTER_FALLBACK = "local"
+DEFAULT_VOICE_OPENROUTER_FALLBACK = "none"
 DEFAULT_VOICE_LOCAL_MODEL = "small"
 DEFAULT_VOICE_LANGUAGE = "ru"
 DEFAULT_NOTION_ENV_FILE = "/root/.notion/notion.env"
@@ -205,6 +205,25 @@ def close_active_article(registry: dict[str, Any], teacher_id: str, reason: str,
     pending = registry.setdefault("pending_article_edits", {})
     if isinstance(pending, dict):
         pending.pop(str(teacher_id), None)
+
+
+def reset_chat_session(registry: dict[str, Any], teacher_id: str, now: str) -> None:
+    teacher_key = str(teacher_id)
+    pending_reviews = registry.setdefault("pending_reviews", {})
+    if isinstance(pending_reviews, dict):
+        pending_reviews.pop(teacher_key, None)
+    close_active_article(registry, teacher_key, "start_reset", now)
+    sessions = registry.setdefault("chat_sessions", {})
+    if not isinstance(sessions, dict):
+        sessions = {}
+        registry["chat_sessions"] = sessions
+    previous = sessions.get(teacher_key, {})
+    reset_count = int(previous.get("reset_count") or 0) + 1 if isinstance(previous, dict) else 1
+    sessions[teacher_key] = {
+        "status": "active",
+        "started_at": now,
+        "reset_count": reset_count,
+    }
 
 
 def update_article_selection(
@@ -1137,12 +1156,35 @@ def correction_text_from_message(config: dict[str, str], token: str, run_dir: Pa
         api_base_url=api_base_url,
         local_bot_api_root=Path(config.get("local_bot_api_root", DEFAULT_LOCAL_BOT_API_ROOT)),
     )
+    status_path = run_dir / "status.json"
+    status = load_json(status_path, {})
+    status["teacher_voice_transcription_status"] = "started"
+    status["teacher_voice_transcription_started_at"] = utc_now()
+    status.pop("teacher_voice_transcription_failed_at", None)
+    status.pop("teacher_voice_transcription_error_type", None)
+    save_json(status_path, status)
     try:
         transcript = transcribe_voice(config, voice_path)
     except Exception as error:
-        transcript = f"[Голосовая правка сохранена, но не расшифрована автоматически: {voice_path}. Ошибка: {error!r}]"
+        status = load_json(status_path, {})
+        status["teacher_voice_transcription_status"] = "failed"
+        status["teacher_voice_transcription_failed_at"] = utc_now()
+        status["teacher_voice_transcription_error_type"] = type(error).__name__
+        save_json(status_path, status)
+        return "", "voice_failed"
     if not transcript:
-        transcript = f"[Голосовая правка сохранена: {voice_path}. Текст не распознан.]"
+        status = load_json(status_path, {})
+        status["teacher_voice_transcription_status"] = "failed"
+        status["teacher_voice_transcription_failed_at"] = utc_now()
+        status["teacher_voice_transcription_error_type"] = "EmptyTranscript"
+        save_json(status_path, status)
+        return "", "voice_failed"
+    status = load_json(status_path, {})
+    status["teacher_voice_transcription_status"] = "done"
+    status["teacher_voice_transcription_done_at"] = utc_now()
+    status.pop("teacher_voice_transcription_failed_at", None)
+    status.pop("teacher_voice_transcription_error_type", None)
+    save_json(status_path, status)
     return transcript, "voice"
 
 
@@ -1326,6 +1368,26 @@ def make_handler(config: dict[str, str]):
             registry = load_json(registry_file, {"runs": {}})
             if telegram_message_already_processed(registry, message):
                 return
+            message_text = str(message.get("text", "")).strip()
+            command = message_text.split(maxsplit=1)[0].split("@", 1)[0].lower() if message_text else ""
+            if command == "/start":
+                now = utc_now()
+                reset_chat_session(registry, str(chat_id), now)
+                mark_telegram_message_processed(registry, message)
+                save_json(registry_file, registry)
+                append_event(events_file, {
+                    "stage": "telegram_chat_session_reset",
+                    "chat_id": str(chat_id),
+                })
+                safe_telegram_request(token, "sendMessage", {
+                    "chat_id": chat_id,
+                    "text": (
+                        "Новая сессия начата. Старые ожидания правок сброшены. "
+                        "Следующий аудиофайл будет обработан как новый созвон."
+                    ),
+                    "disable_web_page_preview": True,
+                }, api_base_url=api_base_url)
+                return
             pending = registry.get("pending_reviews", {}).get(str(chat_id))
             pending_edit = registry.get("pending_article_edits", {}).get(str(chat_id))
             incoming_audio = extract_audio_message(message)
@@ -1408,14 +1470,20 @@ def make_handler(config: dict[str, str]):
                         message,
                     )
                     if not text or (text.startswith("/") and source == "text"):
-                        safe_telegram_request(token, "sendMessage", {
-                            "chat_id": chat_id,
-                            "text": (
-                                "Не смог получить текст правки. Режим правки всей статьи сохранён, "
-                                "пришли сообщение ещё раз."
+                        if source == "voice_failed":
+                            failure_text = (
+                                "Не удалось расшифровать голосовую правку через OpenRouter. "
+                                "Текущая статья и выбранные блоки сохранены; отправь голосовое ещё раз или напиши текстом."
+                            )
+                        else:
+                            failure_text = (
+                                "Не смог получить текст правки. Режим правки всей статьи сохранён, пришли сообщение ещё раз."
                                 if whole_article
                                 else "Не смог получить текст правки. Выбор блоков сохранён, пришли сообщение ещё раз."
-                            ),
+                            )
+                        safe_telegram_request(token, "sendMessage", {
+                            "chat_id": chat_id,
+                            "text": failure_text,
                             "disable_web_page_preview": True,
                         }, api_base_url=api_base_url)
                         return
@@ -1453,7 +1521,7 @@ def make_handler(config: dict[str, str]):
                         "disable_web_page_preview": True,
                     }, api_base_url=api_base_url)
                     return
-            if not pending:
+            if not pending or incoming_audio:
                 if message.get("voice"):
                     mark_telegram_message_processed(registry, message)
                     save_json(registry_file, registry)
@@ -1544,6 +1612,7 @@ def make_handler(config: dict[str, str]):
                 if result.get("status") == "duplicate":
                     text = "Этот файл уже был принят раньше. Второй pipeline не запускаю."
                 else:
+                    registry.get("pending_reviews", {}).pop(str(chat_id), None)
                     close_active_article(registry, str(chat_id), "new_audio", utc_now())
                     save_json(registry_file, registry)
                     start_pipeline_async()
@@ -1575,7 +1644,12 @@ def make_handler(config: dict[str, str]):
             if not text:
                 safe_telegram_request(token, "sendMessage", {
                     "chat_id": chat_id,
-                    "text": "Я жду текстовую или голосовую правку по текущему анализу.",
+                    "text": (
+                        "Не удалось расшифровать голосовую правку через OpenRouter. "
+                        "Проверка сохранена; отправь голосовое ещё раз или напиши правку текстом."
+                        if source == "voice_failed"
+                        else "Я жду текстовую или голосовую правку по текущему анализу."
+                    ),
                     "disable_web_page_preview": True,
                 }, api_base_url=api_base_url)
                 return
@@ -1675,7 +1749,10 @@ def main() -> int:
         "voice_transcribe_timeout": env.get("TELEGRAM_VOICE_TRANSCRIBE_TIMEOUT", str(DEFAULT_VOICE_TRANSCRIBE_TIMEOUT)),
         "voice_provider": env.get("TELEGRAM_VOICE_TRANSCRIPTION_PROVIDER", env.get("TRANSCRIPTION_PROVIDER", DEFAULT_VOICE_PROVIDER)),
         "voice_openrouter_model": env.get("OPENROUTER_STT_MODEL", DEFAULT_VOICE_OPENROUTER_MODEL),
-        "voice_openrouter_fallback": env.get("OPENROUTER_STT_FALLBACK", DEFAULT_VOICE_OPENROUTER_FALLBACK),
+        "voice_openrouter_fallback": env.get(
+            "TELEGRAM_VOICE_OPENROUTER_FALLBACK",
+            DEFAULT_VOICE_OPENROUTER_FALLBACK,
+        ),
         "voice_local_model": env.get("TELEGRAM_VOICE_LOCAL_MODEL", DEFAULT_VOICE_LOCAL_MODEL),
         "voice_language": env.get("LOCAL_STT_LANGUAGE", DEFAULT_VOICE_LANGUAGE),
         "notion_api_key": env.get("NOTION_API_KEY", ""),

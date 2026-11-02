@@ -1542,6 +1542,41 @@ class TelegramVoiceTranscriptionTests(unittest.TestCase):
         )
 
 
+    def test_webhook_voice_transcription_defaults_to_no_local_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            audio = Path(tmp) / "voice.oga"
+            audio.write_bytes(b"audio")
+            with patch.object(WEBHOOK.subprocess, "run") as run_mock:
+                run_mock.return_value.stdout = "ok\n"
+                WEBHOOK.transcribe_voice({}, audio)
+
+        command = run_mock.call_args.args[0]
+        fallback_index = command.index("--openrouter-fallback") + 1
+        self.assertEqual(command[fallback_index], "none")
+
+    def test_voice_transcription_failure_is_recorded_without_fake_teacher_note(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "status.json").write_text("{}", encoding="utf-8")
+            message = {"voice": {"file_id": "voice-file"}}
+            with patch.object(WEBHOOK, "download_telegram_file"), \
+                patch.object(WEBHOOK, "transcribe_voice", side_effect=RuntimeError("provider unavailable")):
+                text, source = WEBHOOK.correction_text_from_message({}, "token", run_dir, message)
+
+            status = json.loads((run_dir / "status.json").read_text(encoding="utf-8"))
+
+        self.assertEqual((text, source), ("", "voice_failed"))
+        self.assertEqual(status["teacher_voice_transcription_status"], "failed")
+        self.assertEqual(status["teacher_voice_transcription_error_type"], "RuntimeError")
+        self.assertNotIn("provider unavailable", json.dumps(status))
+
+    def test_webhook_service_survives_child_oom_and_example_disables_local_voice_fallback(self) -> None:
+        service = (ROOT / "deploy/systemd/telegram-roadmap-webhook.service").read_text(encoding="utf-8")
+        env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
+        self.assertIn("OOMPolicy=continue", service)
+        self.assertIn("TELEGRAM_VOICE_OPENROUTER_FALLBACK=none", env_example)
+        self.assertIn("TELEGRAM_VOICE_TRANSCRIBE_TIMEOUT=300", env_example)
+
 class GeminiRewriteScriptTests(unittest.TestCase):
     def test_composite_script_contains_required_stages_and_guards(self) -> None:
         script = (ROOT / "scripts/generate_article_with_gemini_rewrite.sh").read_text(encoding="utf-8")
@@ -2364,6 +2399,89 @@ class WebhookApprovalTests(TempRunMixin, unittest.TestCase):
         self.run_patch.stop()
         self.safe_patch.stop()
         super().tearDown()
+
+    def test_start_resets_server_side_chat_context(self) -> None:
+        registry = json.loads(self.registry.read_text(encoding="utf-8"))
+        registry["pending_article_edits"] = {
+            "42": {"run_dir": str(self.run_dir), "article_version": 1}
+        }
+        registry["active_articles"] = {
+            "42": {"status": "active", "run_dir": str(self.run_dir), "article_version": 1}
+        }
+        self.registry.write_text(json.dumps(registry), encoding="utf-8")
+
+        self.handler().handle_message({"message_id": 4001, "chat": {"id": 42}, "text": "/start"})
+
+        saved = json.loads(self.registry.read_text(encoding="utf-8"))
+        self.assertNotIn("42", saved.get("pending_reviews", {}))
+        self.assertNotIn("42", saved.get("pending_article_edits", {}))
+        self.assertEqual(saved["active_articles"]["42"]["status"], "closed")
+        self.assertEqual(saved["active_articles"]["42"]["reason"], "start_reset")
+        self.assertIn("42:4001", saved.get("processed_messages", {}))
+        self.assertIn("telegram_chat_session_reset", self.events.read_text(encoding="utf-8"))
+        self.start_mock.assert_not_called()
+
+    def test_forwarded_audio_with_pending_review_starts_new_pipeline(self) -> None:
+        result = {
+            "status": "accepted",
+            "intake_id": "telegram-message:42:4002",
+            "file_name": "new-call.m4a",
+            "local_path": "/tmp/new-call.m4a",
+            "inbox_path": "/tmp/inbox/new-call.m4a",
+        }
+        message = {
+            "message_id": 4002,
+            "chat": {"id": 42},
+            "forward_origin": {"type": "user"},
+            "audio": {
+                "file_id": "new-call",
+                "file_unique_id": "new-call-unique",
+                "file_name": "new-call.m4a",
+                "mime_type": "audio/mp4",
+                "file_size": 22 * 1024 * 1024,
+            },
+        }
+
+        with patch.object(WEBHOOK, "accept_audio_message_for_pipeline", return_value=result) as accept_mock, \
+            patch.object(WEBHOOK, "correction_text_from_message") as correction_mock, \
+            patch.object(WEBHOOK, "start_notion_archive_worker_async") as archive_mock:
+            self.handler({"telegram_api_base_url": "http://127.0.0.1:8081"}).handle_message(message)
+
+        accept_mock.assert_called_once()
+        correction_mock.assert_not_called()
+        archive_mock.assert_called_once()
+        self.start_mock.assert_called_once()
+        saved = json.loads(self.registry.read_text(encoding="utf-8"))
+        self.assertNotIn("42", saved.get("pending_reviews", {}))
+        sent_texts = [payload["text"] for method, payload in self.sent if method == "sendMessage"]
+        self.assertTrue(any("new-call.m4a" in text for text in sent_texts))
+
+    def test_failed_new_audio_keeps_pending_review(self) -> None:
+        message = {
+            "message_id": 4003,
+            "chat": {"id": 42},
+            "audio": {
+                "file_id": "broken-call",
+                "file_unique_id": "broken-call-unique",
+                "file_name": "broken-call.m4a",
+                "mime_type": "audio/mp4",
+                "file_size": 10 * 1024 * 1024,
+            },
+        }
+
+        with patch.object(
+            WEBHOOK,
+            "accept_audio_message_for_pipeline",
+            side_effect=RuntimeError("download failed"),
+        ), patch.object(WEBHOOK, "correction_text_from_message") as correction_mock:
+            self.handler({"telegram_api_base_url": "http://127.0.0.1:8081"}).handle_message(message)
+
+        correction_mock.assert_not_called()
+        self.start_mock.assert_not_called()
+        saved = json.loads(self.registry.read_text(encoding="utf-8"))
+        self.assertIn("42", saved.get("pending_reviews", {}))
+        sent_texts = [payload["text"] for method, payload in self.sent if method == "sendMessage"]
+        self.assertTrue(any("Не смог принять аудио" in text for text in sent_texts))
 
     def test_approval_text_detection(self) -> None:
         approvals = ["согласен", "Совсем согласен", "всё верно", "подтверждаю", "делай статью"]
