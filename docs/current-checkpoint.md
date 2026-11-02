@@ -1,6 +1,22 @@
 # Current Checkpoint
 
-Last updated: 2026-08-26
+Last updated: 2026-11-02
+
+## 2026-11-02 Provider Recovery
+
+- Codex verification and article draft generation explicitly use
+  `gpt-5.6-terra` with reasoning effort `medium`; neither stage depends on the
+  global Codex CLI model setting.
+- Verification uses Codex CLI first and OpenRouter only as a fallback.
+- The OpenRouter credential was rotated in the production-only
+  `/etc/zoom-audio-pipeline/pipeline.env`; no secret is stored in Git.
+- Real provider smokes passed for both Codex Terra Medium and the
+  `google/gemini-2.5-pro` OpenRouter route.
+- The previously blocked run ending in `05377383` recovered from its saved
+  transcript without retranscription, produced `verification.md`, and sent the
+  verification-ready Telegram notification.
+- Production rollback backup:
+  `/var/backups/zoom-audio-pipeline/ad8818a-pre-20261102T193600Z`.
 
 ## Status
 
