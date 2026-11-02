@@ -39,7 +39,9 @@ install -m 0755 "$ROOT_DIR/scripts/telegram_intake_cleanup.py" "$BIN_DIR/telegra
 install -m 0755 "$ROOT_DIR/scripts/transcribe_telegram_voice.py" "$BIN_DIR/transcribe-telegram-voice"
 install -m 0755 "$ROOT_DIR/scripts/configure_pipeline_env_from_legacy.py" "$BIN_DIR/configure-pipeline-env-from-legacy"
 install -m 0755 "$ROOT_DIR/scripts/openrouter_roadmap_generate.py" "$BIN_DIR/openrouter-roadmap-generate"
+install -m 0755 "$ROOT_DIR/scripts/generate_verification_with_codex.sh" "$BIN_DIR/generate-verification-with-codex"
 install -m 0755 "$ROOT_DIR/scripts/generate_verification_with_openrouter.sh" "$BIN_DIR/generate-verification-with-openrouter"
+install -m 0755 "$ROOT_DIR/scripts/generate_verification_with_fallback.py" "$BIN_DIR/generate-verification-with-fallback"
 install -m 0755 "$ROOT_DIR/scripts/generate_article_with_openrouter.sh" "$BIN_DIR/generate-article-with-openrouter"
 install -m 0755 "$ROOT_DIR/scripts/generate_article_with_codex.sh" "$BIN_DIR/generate-article-with-codex"
 install -m 0755 "$ROOT_DIR/scripts/run_codex_article_hedge.py" "$BIN_DIR/run-codex-article-hedge"
@@ -76,7 +78,8 @@ python3 -m py_compile \
   "$BIN_DIR/telegram-intake-cleanup" \
   "$BIN_DIR/roadmap-article-editor" \
   "$BIN_DIR/configure-pipeline-env-from-legacy" \
-  "$BIN_DIR/openrouter-roadmap-generate"
+  "$BIN_DIR/openrouter-roadmap-generate" \
+  "$BIN_DIR/generate-verification-with-fallback"
 
 systemctl daemon-reload
 

@@ -46,6 +46,10 @@ NOTION_PULL = load_module("notion_pull_audio", "scripts/notion_pull_audio.py")
 ARCHIVE_WORKER = load_module("telegram_notion_archive_worker", "scripts/telegram_notion_archive_worker.py")
 CLEANUP = load_module("telegram_intake_cleanup", "scripts/telegram_intake_cleanup.py")
 OPENROUTER_GENERATOR = load_module("openrouter_roadmap_generate", "scripts/openrouter_roadmap_generate.py")
+VERIFICATION_FALLBACK = load_module(
+    "generate_verification_with_fallback",
+    "scripts/generate_verification_with_fallback.py",
+)
 ENV_MIGRATOR = load_module("configure_pipeline_env_from_legacy", "scripts/configure_pipeline_env_from_legacy.py")
 VOICE_TRANSCRIBER = load_module("transcribe_telegram_voice", "scripts/transcribe_telegram_voice.py")
 
@@ -1566,6 +1570,52 @@ class GeminiRewriteScriptTests(unittest.TestCase):
 
 
 class OpenRouterRoadmapGeneratorTests(unittest.TestCase):
+    def test_verification_chain_uses_openrouter_after_codex_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "status.json").write_text("{}", encoding="utf-8")
+            calls: list[str] = []
+
+            def fake_run(command: list[str], **_kwargs: object) -> None:
+                calls.append(command[0])
+                if command[0] == "codex-provider":
+                    raise subprocess.CalledProcessError(1, command)
+                (run_dir / "verification.md").write_text("ready", encoding="utf-8")
+
+            result = VERIFICATION_FALLBACK.run_chain(
+                run_dir,
+                [("codex", "codex-provider"), ("openrouter", "openrouter-provider")],
+                run_command=fake_run,
+            )
+
+            status = json.loads((run_dir / "status.json").read_text(encoding="utf-8"))
+            log = (run_dir / "verification-provider-fallback.log").read_text(encoding="utf-8")
+
+        self.assertEqual(result, 0)
+        self.assertEqual(calls, ["codex-provider", "openrouter-provider"])
+        self.assertEqual(status["verification_provider"], "openrouter")
+        self.assertIn("provider_failed provider=codex", log)
+        self.assertIn("provider_succeeded provider=openrouter", log)
+
+    def test_verification_chain_records_terminal_provider_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "status.json").write_text("{}", encoding="utf-8")
+
+            def fail(command: list[str], **_kwargs: object) -> None:
+                raise subprocess.CalledProcessError(1, command)
+
+            result = VERIFICATION_FALLBACK.run_chain(
+                run_dir,
+                [("codex", "codex-provider"), ("openrouter", "openrouter-provider")],
+                run_command=fail,
+            )
+            status = json.loads((run_dir / "status.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(result, 1)
+        self.assertEqual(status["verification_status"], "failed")
+        self.assertEqual(status["verification_providers_failed"], ["codex", "openrouter"])
+
     def test_article_prompt_uses_verification_teacher_notes_enhancements_and_transcript(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1604,7 +1654,7 @@ class OpenRouterRoadmapGeneratorTests(unittest.TestCase):
         self.assertIn("/etc/zoom-audio-pipeline/pipeline.env", runner)
         self.assertIn('telegram-notion-archive-worker --env-file "$ENV_FILE"', runner)
         self.assertIn('notion-pull-audio --env-file "$ENV_FILE"', runner)
-        self.assertIn("VERIFICATION_SCRIPT:-/usr/local/bin/generate-verification-with-openrouter", runner)
+        self.assertIn("VERIFICATION_SCRIPT:-/usr/local/bin/generate-verification-with-fallback", runner)
         self.assertIn("ARTICLE_DRAFT_SCRIPT:-/usr/local/bin/generate-article-with-codex", runner)
         self.assertIn('LOCAL_STT_MODEL="${LOCAL_STT_MODEL:-tiny}"', runner)
         self.assertIn('--model "$LOCAL_STT_MODEL"', runner)
@@ -1626,7 +1676,9 @@ class OpenRouterRoadmapGeneratorTests(unittest.TestCase):
         for expected in [
             "notion-webhook-receiver",
             "openrouter-roadmap-generate",
+            "generate-verification-with-codex",
             "generate-verification-with-openrouter",
+            "generate-verification-with-fallback",
             "generate-article-with-openrouter",
             "generate-article-with-codex",
             "roadmap-article-editor",
@@ -2078,6 +2130,92 @@ class ProcessNewAudioIntakeNotifyTests(unittest.TestCase):
 
         self.assertEqual(args[:6], ["--stage", "verification_ready", "--audio", "lesson.m4a", "--run-dir", str(run_dir)])
         self.assertEqual(args[-2:], ["--chat-id", "1607901073"])
+
+    def test_verification_failure_is_rate_limited_without_crashing_runner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "run"
+            run_dir.mkdir()
+            status_path = run_dir / "status.json"
+            events_path = root / "events.jsonl"
+            status_path.write_text(
+                json.dumps({"telegram_chat_id": "1607901073"}),
+                encoding="utf-8",
+            )
+
+            failure = subprocess.CalledProcessError(1, ["verification", str(run_dir)])
+            with patch.object(PROCESS_AUDIO.subprocess, "run", side_effect=failure) as run_mock, \
+                    patch.object(PROCESS_AUDIO, "notify", return_value=True) as notify_mock:
+                first = PROCESS_AUDIO.run_verification(
+                    "verification",
+                    run_dir,
+                    "lesson.m4a",
+                    events_path,
+                    retry_base_sec=60,
+                    retry_max_sec=900,
+                    failure_notify_after=1,
+                    now=1000,
+                    notify_script="notify",
+                    intake_meta={"telegram_chat_id": "1607901073"},
+                )
+                second = PROCESS_AUDIO.run_verification(
+                    "verification",
+                    run_dir,
+                    "lesson.m4a",
+                    events_path,
+                    retry_base_sec=60,
+                    retry_max_sec=900,
+                    failure_notify_after=1,
+                    now=1030,
+                    notify_script="notify",
+                    intake_meta={"telegram_chat_id": "1607901073"},
+                )
+
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+            self.assertFalse(first)
+            self.assertFalse(second)
+            self.assertEqual(run_mock.call_count, 1)
+            self.assertEqual(status["verification_attempts"], 1)
+            self.assertIn("verification_next_retry_at", status)
+            self.assertIn("verification_failure_notified_at", status)
+            self.assertEqual(notify_mock.call_count, 1)
+            self.assertIn("verification_retry_deferred", events_path.read_text(encoding="utf-8"))
+
+    def test_verification_recovery_clears_retry_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "run"
+            run_dir.mkdir()
+            status_path = run_dir / "status.json"
+            events_path = root / "events.jsonl"
+            status_path.write_text(
+                json.dumps(
+                    {
+                        "verification_attempts": 2,
+                        "verification_next_retry_at": "1970-01-01T00:00:01Z",
+                        "verification_failure_notified_at": "1970-01-01T00:00:01Z",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            def succeed(_command: list[str], **_kwargs: object) -> None:
+                (run_dir / "verification.md").write_text("ready", encoding="utf-8")
+
+            with patch.object(PROCESS_AUDIO.subprocess, "run", side_effect=succeed):
+                recovered = PROCESS_AUDIO.run_verification(
+                    "verification",
+                    run_dir,
+                    "lesson.m4a",
+                    events_path,
+                    now=1000,
+                )
+
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+            self.assertTrue(recovered)
+            self.assertNotIn("verification_next_retry_at", status)
+            self.assertEqual(status["verification_attempts_used"], 3)
+            self.assertIn("verification_recovered_at", status)
 
     def test_openrouter_fallback_failure_marks_status_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

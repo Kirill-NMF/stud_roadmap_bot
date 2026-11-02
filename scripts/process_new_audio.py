@@ -518,32 +518,126 @@ def run_verification(
     events_path: Path,
     *,
     force: bool = False,
-) -> None:
+    retry_base_sec: int = 60,
+    retry_max_sec: int = 900,
+    failure_notify_after: int = 3,
+    now: float | None = None,
+    notify_script: str = "",
+    intake_meta: dict[str, Any] | None = None,
+) -> bool:
     if not script_path:
-        return
+        return False
     verification_path = run_dir / "verification.md"
     if verification_path.exists() and verification_path.stat().st_size > 0 and not force:
         print(f"verification_skipped: {audio_name} -> {verification_path}")
-        return
+        return True
+
+    status_path = run_dir / "status.json"
+    status = load_state(status_path)
+    current_time = time.time() if now is None else now
+    next_retry_at = parse_utc_ts(str(status.get("verification_next_retry_at") or ""))
+    if not force and next_retry_at and current_time < next_retry_at:
+        append_event(
+            events_path,
+            {
+                "stage": "verification_retry_deferred",
+                "audio": audio_name,
+                "run_dir": str(run_dir),
+                "retry_at": status.get("verification_next_retry_at"),
+            },
+        )
+        return False
 
     append_event(events_path, {"stage": "verification_started", "audio": audio_name, "run_dir": str(run_dir)})
     print(f"verification: {audio_name} -> {verification_path}")
     try:
         subprocess.run([script_path, str(run_dir)], check=True)
     except Exception as error:
-        append_event(events_path, {"stage": "verification_error", "audio": audio_name, "run_dir": str(run_dir), "error": repr(error)})
-        raise
+        status = load_state(status_path)
+        attempts = int(status.get("verification_attempts") or 0) + 1
+        retry_delay = min(max(1, retry_base_sec) * (2 ** max(0, attempts - 1)), max(1, retry_max_sec))
+        retry_at = current_time + retry_delay
+        status.update(
+            {
+                "verification_status": "failed",
+                "verification_attempts": attempts,
+                "verification_last_failed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(current_time)),
+                "verification_next_retry_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(retry_at)),
+            }
+        )
+        append_event(
+            events_path,
+            {
+                "stage": "verification_error",
+                "audio": audio_name,
+                "run_dir": str(run_dir),
+                "error": repr(error),
+                "attempt": attempts,
+                "retry_after_sec": retry_delay,
+            },
+        )
+        if attempts >= max(1, failure_notify_after) and not status.get("verification_failure_notified_at"):
+            message = (
+                "Не удалось подготовить проверку перед статьёй. Транскрипт сохранён, данные не потеряны. "
+                "Pipeline повторит этот этап автоматически после восстановления сервиса.\n"
+                f"Файл: {audio_name}"
+            )
+            custom_args = ["--stage", "custom", "--text", message]
+            chat_id = str((intake_meta or {}).get("telegram_chat_id") or status.get("telegram_chat_id") or "").strip()
+            if chat_id:
+                custom_args.extend(["--chat-id", chat_id])
+            if notify(notify_script, custom_args):
+                status["verification_failure_notified_at"] = time.strftime(
+                    "%Y-%m-%dT%H:%M:%SZ", time.gmtime(current_time)
+                )
+        status_path.write_text(json.dumps(status, ensure_ascii=False, indent=2), encoding="utf-8")
+        return False
+
+    status = load_state(status_path)
+    previous_attempts = int(status.get("verification_attempts") or 0)
+    if previous_attempts:
+        status["verification_attempts_used"] = previous_attempts + 1
+        status["verification_recovered_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(current_time))
+    for key in (
+        "verification_attempts",
+        "verification_next_retry_at",
+        "verification_last_failed_at",
+        "verification_failure_notified_at",
+    ):
+        status.pop(key, None)
+    status_path.write_text(json.dumps(status, ensure_ascii=False, indent=2), encoding="utf-8")
     append_event(events_path, {"stage": "verification_done", "audio": audio_name, "run_dir": str(run_dir), "verification": str(verification_path)})
     print(f"verification_done: {audio_name} -> {verification_path}")
+    return True
 
 
-def notify(script_path: str, args: list[str]) -> None:
+def notify(script_path: str, args: list[str]) -> bool:
     if not script_path:
-        return
+        return False
     try:
         subprocess.run([script_path, *args], check=True)
     except Exception as error:
         print(f"telegram_notify_error: {error!r}", file=sys.stderr)
+        return False
+    return True
+
+
+def notify_verification_ready_if_needed(
+    notify_script: str,
+    run_dir: Path,
+    audio_name: str,
+    intake_meta: dict[str, Any] | None = None,
+) -> bool:
+    status_path = run_dir / "status.json"
+    status = load_state(status_path)
+    if status.get("verification_notified_at"):
+        return False
+    if not notify(notify_script, notify_args("verification_ready", audio_name, run_dir, intake_meta)):
+        return False
+    status = load_state(status_path)
+    status["verification_notified_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    status_path.write_text(json.dumps(status, ensure_ascii=False, indent=2), encoding="utf-8")
+    return True
 
 
 def main() -> int:
@@ -617,6 +711,21 @@ def main() -> int:
         type=int,
         default=int(os.environ.get("TRANSCRIPTION_STALE_AFTER_SEC", "3600")),
     )
+    parser.add_argument(
+        "--verification-retry-base-sec",
+        type=int,
+        default=int(os.environ.get("VERIFICATION_RETRY_BASE_SEC", "60")),
+    )
+    parser.add_argument(
+        "--verification-retry-max-sec",
+        type=int,
+        default=int(os.environ.get("VERIFICATION_RETRY_MAX_SEC", "900")),
+    )
+    parser.add_argument(
+        "--verification-failure-notify-after",
+        type=int,
+        default=int(os.environ.get("VERIFICATION_FAILURE_NOTIFY_AFTER", "3")),
+    )
     parser.add_argument("--verification-script", default="")
     parser.add_argument("--notify-script", default="")
     parser.add_argument("--force", action="store_true")
@@ -643,7 +752,25 @@ def main() -> int:
             run_dir_value = entry.get("run_dir")
             transcript_path = Path(run_dir_value) / "transcript.md" if run_dir_value else None
             if transcript_path and transcript_path.exists():
-                run_verification(args.verification_script, Path(run_dir_value), audio_path.name, events_path)
+                existing_run_dir = Path(run_dir_value)
+                verification_done = run_verification(
+                    args.verification_script,
+                    existing_run_dir,
+                    audio_path.name,
+                    events_path,
+                    retry_base_sec=args.verification_retry_base_sec,
+                    retry_max_sec=args.verification_retry_max_sec,
+                    failure_notify_after=args.verification_failure_notify_after,
+                    notify_script=args.notify_script,
+                    intake_meta=intake_meta,
+                )
+                if verification_done:
+                    notify_verification_ready_if_needed(
+                        args.notify_script,
+                        existing_run_dir,
+                        audio_path.name,
+                        intake_meta,
+                    )
                 continue
             elif entry.get("status") == "transcribing":
                 started_at = parse_utc_ts(str(entry.get("started_at") or ""))
@@ -821,11 +948,23 @@ def main() -> int:
             notify_args("transcript_ready", audio_path.name, run_dir, intake_meta),
         )
 
-        run_verification(args.verification_script, run_dir, audio_path.name, events_path)
-        if args.verification_script and (run_dir / "verification.md").exists():
-            notify(
+        verification_done = run_verification(
+            args.verification_script,
+            run_dir,
+            audio_path.name,
+            events_path,
+            retry_base_sec=args.verification_retry_base_sec,
+            retry_max_sec=args.verification_retry_max_sec,
+            failure_notify_after=args.verification_failure_notify_after,
+            notify_script=args.notify_script,
+            intake_meta=intake_meta,
+        )
+        if verification_done:
+            notify_verification_ready_if_needed(
                 args.notify_script,
-                notify_args("verification_ready", audio_path.name, run_dir, intake_meta),
+                run_dir,
+                audio_path.name,
+                intake_meta,
             )
 
     save_state(state_path, state)

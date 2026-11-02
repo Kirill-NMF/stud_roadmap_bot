@@ -56,7 +56,9 @@ for path in \
   /usr/local/bin/telegram-roadmap-webhook \
   /usr/local/bin/telegram-roadmap-notify \
   /usr/local/bin/openrouter-roadmap-generate \
+  /usr/local/bin/generate-verification-with-codex \
   /usr/local/bin/generate-verification-with-openrouter \
+  /usr/local/bin/generate-verification-with-fallback \
   /usr/local/bin/generate-article-with-openrouter \
   /usr/local/bin/generate-article-with-codex \
   /usr/local/bin/run-codex-article-hedge \
