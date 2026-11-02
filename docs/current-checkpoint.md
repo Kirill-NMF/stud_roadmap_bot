@@ -435,6 +435,31 @@ Latest style and verification hardening (2026-10-21):
 - Production rollback point:
   `/var/backups/zoom-audio-pipeline/01edf9d-pre-20261021`.
 
+Latest Telegram session and audio-routing recovery (2026-11-02):
+
+- Commit `1eb68aa` is deployed on the VPS.
+- `/start` now atomically clears pending verification and article-edit routing
+  for the chat without deleting historical runs or artifacts.
+- Telegram `audio` and audio `document` messages, including forwarded files,
+  always enter the new-call intake path. Only Telegram `voice` messages can be
+  interpreted as teacher corrections.
+- A new call replaces prior pending context only after durable intake succeeds;
+  download failures preserve the previous pending verification.
+- Teacher voice transcription uses OpenRouter with a 300-second bound and no
+  local Whisper fallback inside the webhook service. Provider failures are
+  visible to the teacher and never become synthetic correction text.
+- The clean Linux suite passes `162/162`; focused routing tests pass `4/4`,
+  `git diff --check` passes, and the repository secret scan is clean.
+- A real Telethon `/start` smoke received the new reset acknowledgement.
+- Telegram message `867`, which had been misrouted before deployment, was
+  recovered idempotently as `Данил_B1-4.m4a`. Notion archive status is
+  `uploaded`; transcription and verification both completed and Telegram now
+  points to the recovered run for teacher approval.
+- Runtime health returns `200`; the webhook has zero post-deploy restarts,
+  `OOMPolicy=continue`, and approximately 16 MB resident memory at stage close.
+- Production rollback point:
+  `/var/backups/zoom-audio-pipeline/1eb68aa-pre-20261102T201123Z`.
+
 ## Next Useful Hardening
 
 - Add focused tests for `process-new-audio` in-progress/idempotency behavior.
