@@ -460,6 +460,29 @@ Latest Telegram session and audio-routing recovery (2026-11-02):
 - Production rollback point:
   `/var/backups/zoom-audio-pipeline/1eb68aa-pre-20261102T201123Z`.
 
+Latest OpenRouter voice-key source fix (2026-11-02):
+
+- Commit `432fc6b` is deployed on the VPS.
+- Root cause: the Telegram webhook loaded the rotated OpenRouter key from
+  `pipeline.env` for its own configuration but did not pass that loaded
+  environment to the voice STT subprocess. The subprocess silently fell back
+  to `/root/.config/openrouter/api_key`, which still contained the expired key,
+  and OpenRouter returned HTTP 401 `API key expired`.
+- Voice STT now reloads `OPENROUTER_API_KEY` from the canonical `pipeline.env`
+  for every correction, passes it only through the child environment, and
+  explicitly disables the hidden key-file fallback. Key rotation therefore
+  takes effect on the next voice request without a webhook restart.
+- The key is never placed in process arguments, logs, status files, tests, or
+  Git. The runtime env remains mode `600` and owned by `root`.
+- The Linux suite passes `163/163`; focused voice tests pass `7/7`. A real
+  candidate-code STT smoke transcribed the affected saved voice successfully.
+- The failed Danil B1-5 correction was recovered idempotently from the saved
+  Telegram voice file. Terra Medium generation and Gemini Pro rewrite both
+  completed, validation is `ok`, and HTML/PDF were delivered in Telegram.
+- Runtime health returns `200`; the webhook has zero post-deploy restarts.
+- Production rollback point:
+  `/var/backups/zoom-audio-pipeline/432fc6b-pre-20261102T203343Z`.
+
 ## Next Useful Hardening
 
 - Add focused tests for `process-new-audio` in-progress/idempotency behavior.
