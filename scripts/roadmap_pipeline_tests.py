@@ -1534,6 +1534,8 @@ class TelegramVoiceTranscriptionTests(unittest.TestCase):
                 "openai/whisper-large-v3-turbo",
                 "--openrouter-fallback",
                 "local",
+                "--openrouter-api-key-file",
+                "",
                 "--model",
                 "small",
                 "--language",
@@ -1553,6 +1555,29 @@ class TelegramVoiceTranscriptionTests(unittest.TestCase):
         command = run_mock.call_args.args[0]
         fallback_index = command.index("--openrouter-fallback") + 1
         self.assertEqual(command[fallback_index], "none")
+
+    def test_voice_transcription_uses_current_pipeline_env_key_without_key_file_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audio = root / "voice.oga"
+            audio.write_bytes(b"audio")
+            env_file = root / "pipeline.env"
+            env_file.write_text("OPENROUTER_API_KEY=current-key\n", encoding="utf-8")
+            config = {
+                "env_file": str(env_file),
+                "voice_provider": "openrouter",
+            }
+            with patch.dict(os.environ, {"OPENROUTER_API_KEY": "stale-process-key"}), \
+                patch.object(WEBHOOK.subprocess, "run") as run_mock:
+                run_mock.return_value.stdout = "ok\n"
+                WEBHOOK.transcribe_voice(config, audio)
+
+        command = run_mock.call_args.args[0]
+        child_env = run_mock.call_args.kwargs["env"]
+        key_file_index = command.index("--openrouter-api-key-file") + 1
+        self.assertEqual(child_env["OPENROUTER_API_KEY"], "current-key")
+        self.assertEqual(command[key_file_index], "")
+        self.assertNotIn("current-key", command)
 
     def test_voice_transcription_failure_is_recorded_without_fake_teacher_note(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

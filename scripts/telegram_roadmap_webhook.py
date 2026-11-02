@@ -978,6 +978,14 @@ def transcribe_voice(config: dict[str, str], audio_path: Path) -> str:
     python = config.get("voice_python", DEFAULT_VOICE_PYTHON)
     script = config.get("voice_transcriber", DEFAULT_VOICE_TRANSCRIBER)
     timeout = int(config.get("voice_transcribe_timeout", str(DEFAULT_VOICE_TRANSCRIBE_TIMEOUT)))
+    env_file = config.get("env_file", "")
+    runtime_env = load_env(Path(env_file)) if env_file else {}
+    child_env = dict(os.environ)
+    current_api_key = runtime_env.get("OPENROUTER_API_KEY", "").strip()
+    if current_api_key:
+        child_env["OPENROUTER_API_KEY"] = current_api_key
+    else:
+        child_env.pop("OPENROUTER_API_KEY", None)
     command = [
         python,
         script,
@@ -988,6 +996,8 @@ def transcribe_voice(config: dict[str, str], audio_path: Path) -> str:
         config.get("voice_openrouter_model", DEFAULT_VOICE_OPENROUTER_MODEL),
         "--openrouter-fallback",
         config.get("voice_openrouter_fallback", DEFAULT_VOICE_OPENROUTER_FALLBACK),
+        "--openrouter-api-key-file",
+        "",
         "--model",
         config.get("voice_local_model", DEFAULT_VOICE_LOCAL_MODEL),
         "--language",
@@ -999,6 +1009,7 @@ def transcribe_voice(config: dict[str, str], audio_path: Path) -> str:
         capture_output=True,
         text=True,
         timeout=timeout,
+        env=child_env,
     )
     return result.stdout.strip()
 
